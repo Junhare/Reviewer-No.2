@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { createUser, findUserByEmail, findUserById, getOrCreateDefaultUser } from "@/lib/product-store";
 
 const sessionCookieName = "rf_user";
+const sessionMaxAgeSeconds = 60 * 60 * 24 * 30;
 
 export async function getCurrentUser() {
   const cookieStore = await cookies();
@@ -32,6 +33,7 @@ export async function registerUser(input: { email: string; password: string; nam
   const cookieStore = await cookies();
   cookieStore.set(sessionCookieName, user.id, {
     httpOnly: true,
+    maxAge: sessionMaxAgeSeconds,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
@@ -46,6 +48,7 @@ export async function loginUser(input: { email: string; password: string }) {
   const cookieStore = await cookies();
   cookieStore.set(sessionCookieName, user.id, {
     httpOnly: true,
+    maxAge: sessionMaxAgeSeconds,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",

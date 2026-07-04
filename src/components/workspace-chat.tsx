@@ -50,6 +50,12 @@ type ConversationSummary = {
   updatedAt: string;
 };
 type AccountUser = { id: string; email: string; name: string };
+type WorkspaceCache = {
+  projects: ProjectSummary[];
+  conversations: ConversationSummary[];
+  activeProjectId: string | null;
+  activeConversationId: string | null;
+};
 type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
 type SidebarMenuTarget = { type: "project" | "chat"; id: string } | null;
 
@@ -108,13 +114,27 @@ export function WorkspaceChat() {
   useEffect(() => {
     let cancelled = false;
     async function loadSession() {
-      const response = await fetch("/api/auth/me");
-      if (cancelled) return;
-      if (response.ok) {
-        const data = (await response.json()) as { user: AccountUser | null };
-        setAccount(data.user);
+      try {
+        const response = await fetch("/api/auth/me");
+        if (cancelled) return;
+        if (response.ok) {
+          const data = (await response.json()) as { user: AccountUser | null };
+          const sessionUser = data.user ?? readCachedAccount();
+          if (sessionUser) {
+            setAccount(sessionUser);
+            writeCachedAccount(sessionUser);
+          }
+        } else {
+          const sessionUser = readCachedAccount();
+          if (sessionUser) setAccount(sessionUser);
+        }
+      } catch {
+        if (cancelled) return;
+        const sessionUser = readCachedAccount();
+        if (sessionUser) setAccount(sessionUser);
+      } finally {
+        if (!cancelled) setAuthChecked(true);
       }
-      setAuthChecked(true);
     }
     void loadSession();
     return () => {
@@ -131,6 +151,35 @@ export function WorkspaceChat() {
     return () => window.removeEventListener("click", closeSidebarMenu);
   }, []);
 
+  function resetWorkspaceState() {
+    for (const timer of persistTimersRef.current.values()) window.clearTimeout(timer);
+    persistTimersRef.current.clear();
+    conversationsRef.current = [];
+    activeConversationIdRef.current = null;
+    setProjects([]);
+    setConversations([]);
+    setActiveProjectId(null);
+    setActiveConversationId(null);
+    setMessages([]);
+    setPendingRunId(null);
+    setSidebarMenu(null);
+    setSidebarQuery("");
+    setInput("");
+    setIsRunning(false);
+    setProgressLog("Ready");
+  }
+
+  function applyWorkspaceCache(cache: WorkspaceCache) {
+    conversationsRef.current = cache.conversations;
+    activeConversationIdRef.current = cache.activeConversationId;
+    setProjects(cache.projects);
+    setConversations(cache.conversations);
+    setActiveProjectId(cache.activeProjectId);
+    setActiveConversationId(cache.activeConversationId);
+    const active = cache.conversations.find((conversation) => conversation.id === cache.activeConversationId) ?? null;
+    setMessages(active?.messages ?? []);
+  }
+
   useEffect(() => {
     if (!authChecked) return;
     let cancelled = false;
@@ -139,17 +188,27 @@ export function WorkspaceChat() {
         resetWorkspaceState();
         return;
       }
-      const [projectResponse, conversationResponse] = await Promise.all([fetch("/api/projects"), fetch("/api/conversations")]);
+      const cachedWorkspace = readWorkspaceCache(account.id);
+      if (cachedWorkspace) applyWorkspaceCache(cachedWorkspace);
+
+      const [projectResponse, conversationResponse] = await Promise.all([
+        fetch("/api/projects").catch(() => null),
+        fetch("/api/conversations").catch(() => null),
+      ]);
       if (cancelled) return;
-      if (projectResponse.ok) setProjects(((await projectResponse.json()) as { projects: ProjectSummary[] }).projects);
-      if (conversationResponse.ok) {
-        const data = (await conversationResponse.json()) as { conversations: ConversationSummary[] };
-        conversationsRef.current = data.conversations;
-        setConversations(data.conversations);
-        if (data.conversations[0]) {
-          setActiveConversationId(data.conversations[0].id);
-          setActiveProjectId(data.conversations[0].projectId ?? null);
-          setMessages(data.conversations[0].messages);
+      const serverProjects = projectResponse?.ok ? ((await projectResponse.json()) as { projects: ProjectSummary[] }).projects : null;
+      const serverConversations = conversationResponse?.ok
+        ? ((await conversationResponse.json()) as { conversations: ConversationSummary[] }).conversations
+        : null;
+
+      if (serverProjects && (serverProjects.length || !cachedWorkspace)) setProjects(serverProjects);
+      if (serverConversations && (serverConversations.length || !cachedWorkspace)) {
+        conversationsRef.current = serverConversations;
+        setConversations(serverConversations);
+        if (serverConversations[0]) {
+          setActiveConversationId(serverConversations[0].id);
+          setActiveProjectId(serverConversations[0].projectId ?? null);
+          setMessages(serverConversations[0].messages);
         } else {
           setActiveConversationId(null);
           setActiveProjectId(null);
@@ -168,6 +227,16 @@ export function WorkspaceChat() {
     if (stream) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
   }, [messages, isRunning, progressLog]);
 
+  useEffect(() => {
+    if (!account || !authChecked) return;
+    writeWorkspaceCache(account.id, {
+      projects,
+      conversations,
+      activeProjectId,
+      activeConversationId,
+    });
+  }, [account, authChecked, projects, conversations, activeProjectId, activeConversationId]);
+
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthError("");
@@ -183,33 +252,17 @@ export function WorkspaceChat() {
     }
     const data = (await response.json()) as { user: AccountUser };
     setAuthPassword("");
+    writeCachedAccount(data.user);
     setAccount(data.user);
   }
 
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST" });
+    clearCachedAccount();
     setAccount(null);
     resetWorkspaceState();
     setAuthError("");
     setAuthPassword("");
-  }
-
-  function resetWorkspaceState() {
-    for (const timer of persistTimersRef.current.values()) window.clearTimeout(timer);
-    persistTimersRef.current.clear();
-    conversationsRef.current = [];
-    activeConversationIdRef.current = null;
-    setProjects([]);
-    setConversations([]);
-    setActiveProjectId(null);
-    setActiveConversationId(null);
-    setMessages([]);
-    setPendingRunId(null);
-    setSidebarMenu(null);
-    setSidebarQuery("");
-    setInput("");
-    setIsRunning(false);
-    setProgressLog("Ready");
   }
 
   async function handleNewProject() {
@@ -817,6 +870,39 @@ function looksLikeResearchRequest(input: string) {
 
 function createEphemeralSessionId() {
   return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const accountSessionKey = "researchflow.account.current";
+const workspaceCachePrefix = "researchflow.workspace.";
+
+function readCachedAccount() {
+  try {
+    const raw = window.localStorage.getItem(accountSessionKey);
+    return raw ? (JSON.parse(raw) as AccountUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAccount(user: AccountUser) {
+  window.localStorage.setItem(accountSessionKey, JSON.stringify(user));
+}
+
+function clearCachedAccount() {
+  window.localStorage.removeItem(accountSessionKey);
+}
+
+function readWorkspaceCache(accountId: string) {
+  try {
+    const raw = window.localStorage.getItem(`${workspaceCachePrefix}${accountId}`);
+    return raw ? (JSON.parse(raw) as WorkspaceCache) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkspaceCache(accountId: string, cache: WorkspaceCache) {
+  window.localStorage.setItem(`${workspaceCachePrefix}${accountId}`, JSON.stringify(cache));
 }
 
 function formatRunEvents(run: RunSnapshot) {
