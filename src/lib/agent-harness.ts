@@ -2236,8 +2236,6 @@ function buildResult(record: RunRecord): RunResult {
       workflowSummary,
       ...agentLogs,
       ...record.toolTraces.map((trace) => `${trace.tool}: ${trace.summary}`),
-      ...(reviewerStep ? [reviewerStep.summary] : []),
-      ...(routingStep ? [routingStep.summary] : []),
       "最终产物已准备好：paper-blueprint.md。",
     ],
     artifact: {
