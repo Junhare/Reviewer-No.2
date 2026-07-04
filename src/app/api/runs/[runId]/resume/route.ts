@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { resumeRunAndWait } from "@/lib/agent-harness";
+import { resumeRunAndWait, resumeStoredRunAndWait } from "@/lib/agent-harness";
 import { getCurrentUser } from "@/lib/auth";
-import { getRunOwnerContext, upsertRunSnapshot } from "@/lib/product-store";
+import { getRunOwnerContext, getStoredRun, upsertRunSnapshot } from "@/lib/product-store";
 
 export async function POST(
   request: Request,
@@ -23,14 +23,17 @@ export async function POST(
   }
 
   try {
-    const run = await resumeRunAndWait(runId, answer);
+    const storedRun = getStoredRun(user.id, runId);
+    const run = (await resumeRunAndWait(runId, answer)) ?? (storedRun ? await resumeStoredRunAndWait(storedRun.snapshot, answer) : null);
     if (!run) {
       return NextResponse.json({ error: "Run not found" }, { status: 404 });
     }
 
     const context = getRunOwnerContext(runId);
-    if (context && context.ownerId === user.id) {
-      upsertRunSnapshot(user.id, context.projectId, context.topic, run);
+    const projectId = context?.ownerId === user.id ? context.projectId : storedRun?.projectId;
+    const topic = context?.ownerId === user.id ? context.topic : storedRun?.topic;
+    if (projectId && topic) {
+      upsertRunSnapshot(user.id, projectId, topic, run);
     }
 
     return NextResponse.json(run);

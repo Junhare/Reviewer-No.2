@@ -214,12 +214,17 @@ export function WorkspaceChat() {
     setSidebarMenu(null);
     const title = window.prompt("Rename project", project.title)?.trim();
     if (!title || title === project.title) return;
+    const previousProject = project;
+    setProjects((current) => current.map((item) => (item.id === project.id ? { ...item, title, updatedAt: new Date().toISOString() } : item)));
     const response = await fetch(`/api/projects/${project.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title }),
     });
-    if (!response.ok) return;
+    if (!response.ok) {
+      setProjects((current) => current.map((item) => (item.id === previousProject.id ? previousProject : item)));
+      return;
+    }
     const data = (await response.json()) as { project: ProjectSummary };
     setProjects((current) => current.map((item) => (item.id === data.project.id ? data.project : item)));
   }
@@ -242,12 +247,22 @@ export function WorkspaceChat() {
     setSidebarMenu(null);
     const title = window.prompt("Rename chat", conversation.title)?.trim();
     if (!title || title === conversation.title) return;
+    const previousConversation = conversationsRef.current.find((item) => item.id === conversation.id) ?? conversation;
+    clearConversationPersistTimer(conversation.id);
+    replaceConversations(
+      conversationsRef.current.map((item) =>
+        item.id === conversation.id ? { ...item, title, updatedAt: new Date().toISOString() } : item,
+      ),
+    );
     const response = await fetch(`/api/conversations/${conversation.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title }),
     });
-    if (!response.ok) return;
+    if (!response.ok) {
+      replaceConversations(conversationsRef.current.map((item) => (item.id === previousConversation.id ? previousConversation : item)));
+      return;
+    }
     const data = (await response.json()) as { conversation: ConversationSummary };
     replaceConversations(conversationsRef.current.map((item) => (item.id === data.conversation.id ? { ...item, ...data.conversation } : item)));
     if (activeConversationId === data.conversation.id) setMessages(data.conversation.messages);
@@ -258,9 +273,7 @@ export function WorkspaceChat() {
     if (!window.confirm(`Delete chat "${conversation.title}"?`)) return;
     const response = await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
     if (!response.ok) return;
-    const timer = persistTimersRef.current.get(conversation.id);
-    if (timer) window.clearTimeout(timer);
-    persistTimersRef.current.delete(conversation.id);
+    clearConversationPersistTimer(conversation.id);
     const remaining = conversationsRef.current.filter((item) => item.id !== conversation.id);
     replaceConversations(remaining);
     if (activeConversationId === conversation.id) {
@@ -292,6 +305,12 @@ export function WorkspaceChat() {
     setConversations(next);
   }
 
+  function clearConversationPersistTimer(conversationId: string) {
+    const timer = persistTimersRef.current.get(conversationId);
+    if (timer) window.clearTimeout(timer);
+    persistTimersRef.current.delete(conversationId);
+  }
+
   function updateConversationMessages(conversationId: string, updater: (messages: Message[]) => Message[]) {
     const target = conversationsRef.current.find((conversation) => conversation.id === conversationId);
     if (!target) return;
@@ -315,7 +334,11 @@ export function WorkspaceChat() {
         if (!updated) return;
         replaceConversations(
           conversationsRef.current
-            .map((current) => (current.id === updated.id ? { ...current, ...updated } : current))
+            .map((current) =>
+              current.id === updated.id
+                ? { ...current, ...updated, title: current.title !== conversation.title ? current.title : updated.title }
+                : current,
+            )
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
         );
         if (activeConversationIdRef.current === updated.id) setMessages(updated.messages);

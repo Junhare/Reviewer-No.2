@@ -113,8 +113,9 @@ type CrossrefSearchResponse = {
   };
 };
 
-const providerFetchLimit = 25;
-const mergedPaperLimit = 30;
+const providerFetchLimit = getEnvNumber("RESEARCHFLOW_PROVIDER_FETCH_LIMIT", 15);
+const mergedPaperLimit = getEnvNumber("RESEARCHFLOW_MERGED_PAPER_LIMIT", 20);
+const providerTimeoutMs = getEnvNumber("RESEARCHFLOW_PROVIDER_TIMEOUT_MS", 7_000);
 
 export async function searchResearchSources(query: string) {
   const searchQuery = buildAcademicSearchQuery(query);
@@ -146,6 +147,22 @@ function buildAcademicSearchQuery(input: string) {
   const lower = compact.toLowerCase();
   const terms = new Set<string>();
 
+  if (/历史街区|历史文化街区|历史地段|historic(al)?\s+(district|quarter|neighbou?rhood|urban area)/i.test(compact)) {
+    terms.add("historic urban district");
+    terms.add("historic district regeneration");
+  }
+  if (/保护更新|保护性更新|城市更新|更新规划|urban renewal|urban regeneration|conservation/.test(lower)) {
+    terms.add("urban regeneration");
+    terms.add("heritage conservation");
+  }
+  if (/空间活化|空间活力|活力提升|公共空间活化|空间营造|placemaking|public space|vitality/.test(lower)) {
+    terms.add("public space vitality");
+    terms.add("placemaking");
+  }
+  if (/案例研究|案例|个案|case stud(y|ies)/i.test(compact)) {
+    terms.add("case study");
+  }
+
   if (/\btod\b|交通导向|公交导向|轨道交通导向|transit.?oriented/.test(lower)) {
     terms.add("transit-oriented development");
     terms.add("TOD");
@@ -168,6 +185,7 @@ function buildAcademicSearchQuery(input: string) {
 
   const cleaned = compact
     .replace(/可以|帮我|查找|检索|相关|文献|论文|吗|？|\?|一下|请/g, " ")
+    .replace(/我想用|选择|题目|优化|设计|框架|给你|拟定|推荐|建议|当前|本轮/g, " ")
     .replace(/[，。！？、；：,.!?;:()[\]{}"'“”‘’]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -209,7 +227,7 @@ export async function searchOpenAlexWorks(query: string, limit = providerFetchLi
     {
       headers: openAlexHeaders(apiKey),
     },
-    10000,
+    providerTimeoutMs,
   );
 
   if (!response.ok) {
@@ -235,9 +253,11 @@ export async function searchOpenAlexWorks(query: string, limit = providerFetchLi
 }
 
 export async function searchSemanticScholarPapers(query: string, limit = providerFetchLimit): Promise<ProviderSearchResult> {
+  const apiKey = process.env.SEMANTIC_SCHOLAR_API_KEY?.trim();
+  const requestLimit = apiKey ? limit : Math.min(limit, 10);
   const params = new URLSearchParams({
     query,
-    limit: String(limit),
+    limit: String(requestLimit),
     fields: [
       "paperId",
       "externalIds",
@@ -256,7 +276,7 @@ export async function searchSemanticScholarPapers(query: string, limit = provide
     {
       headers: semanticScholarHeaders(),
     },
-    10000,
+    providerTimeoutMs,
   );
 
   if (!response.ok) {
@@ -290,7 +310,7 @@ export async function getSemanticScholarPaper(paperId: string) {
     {
       headers: semanticScholarHeaders(),
     },
-    10000,
+    providerTimeoutMs,
   );
 
   if (!response.ok) {
@@ -311,7 +331,7 @@ export async function searchCrossrefWorks(query: string, rows = providerFetchLim
     params.set("mailto", mailto);
   }
 
-  const response = await fetchWithTimeout(`https://api.crossref.org/works?${params}`, {}, 10000);
+  const response = await fetchWithTimeout(`https://api.crossref.org/works?${params}`, {}, providerTimeoutMs);
   if (!response.ok) {
     throw new Error(`Crossref failed: ${response.status}`);
   }
@@ -337,7 +357,7 @@ export async function searchCrossrefWorks(query: string, rows = providerFetchLim
 export async function getCrossrefWorkByDoi(doi: string) {
   const mailto = process.env.CROSSREF_MAILTO?.trim();
   const suffix = mailto ? `?${new URLSearchParams({ mailto })}` : "";
-  const response = await fetchWithTimeout(`https://api.crossref.org/works/${encodeURIComponent(doi)}${suffix}`, {}, 10000);
+  const response = await fetchWithTimeout(`https://api.crossref.org/works/${encodeURIComponent(doi)}${suffix}`, {}, providerTimeoutMs);
   if (!response.ok) {
     throw new Error(`Crossref DOI lookup failed: ${response.status}`);
   }
@@ -597,4 +617,11 @@ async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: num
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function getEnvNumber(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

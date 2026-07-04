@@ -5,6 +5,11 @@ import { buildMemoryContext, rememberRunTurn } from "@/lib/session-memory";
 
 export type RunStatus = "running" | "waiting_for_user" | "completed" | "failed";
 
+const runResponseDeadlineMs = getEnvNumber("RESEARCHFLOW_RUN_RESPONSE_DEADLINE_MS", 50_000);
+const workflowCheckpointAfterMs = getEnvNumber("RESEARCHFLOW_WORKFLOW_CHECKPOINT_AFTER_MS", 35_000);
+const openAIAgentTimeoutMs = getEnvNumber("OPENAI_AGENT_TIMEOUT_MS", 18_000);
+const openAIAgentMaxAttempts = getEnvNumber("OPENAI_AGENT_MAX_ATTEMPTS", 2);
+
 export type AgentName =
   | "ResearchFlow"
   | "Orchestrator"
@@ -95,6 +100,26 @@ export type RunSnapshot = {
   requiresUserInput?: boolean;
   question?: string;
   result?: RunResult;
+  resumeState?: RunResumeState;
+};
+
+type RunResumeState = {
+  sessionId?: string;
+  topic: string;
+  history: ChatHistoryMessage[];
+  memoryContext: ReturnType<typeof buildMemoryContext>;
+  intent: Intent;
+  createdAt: number;
+  responseWindowStartedAt: number;
+  currentIndex: number;
+  targetStepCount: number;
+  steps: RunStep[];
+  artifacts: Partial<Record<ArtifactName, string>>;
+  liveToolContexts: Partial<Record<"paper-search", string>>;
+  liveSearchQuality?: ResearchSearchQuality;
+  reasoningSummaries: string[];
+  quickActions?: QuickAction[];
+  userClarifications: string[];
 };
 
 type SkillModule = {
@@ -111,6 +136,7 @@ type RunRecord = {
   memoryContext: ReturnType<typeof buildMemoryContext>;
   intent: Intent;
   createdAt: number;
+  responseWindowStartedAt: number;
   status: RunStatus;
   currentIndex: number;
   currentStatus: string;
@@ -417,6 +443,7 @@ export function createRun(topic: string, history: ChatHistoryMessage[] = [], ses
     memoryContext,
     intent,
     createdAt: Date.now(),
+    responseWindowStartedAt: Date.now(),
     status: "running",
     currentIndex: 0,
     currentStatus: "Orchestrator 正在读取上下文并决定下一步",
@@ -453,6 +480,7 @@ export function resumeRun(runId: string, answer: string) {
   if (!trimmed) throw new Error("Missing user answer.");
 
   record.status = "running";
+  record.responseWindowStartedAt = Date.now();
   record.pendingQuestion = undefined;
   record.result = undefined;
   record.topic = `${record.topic}\n\n用户补充：${trimmed}`;
@@ -472,15 +500,24 @@ export async function resumeRunAndWait(runId: string, answer: string) {
   return snapshot ? getRun(snapshot.id) ?? snapshot : null;
 }
 
+export async function resumeStoredRunAndWait(snapshot: RunSnapshot, answer: string) {
+  if (!runs.has(snapshot.id)) {
+    const restored = hydrateRunRecord(snapshot);
+    if (!restored) return null;
+    runs.set(restored.id, restored);
+  }
+
+  return resumeRunAndWait(snapshot.id, answer);
+}
+
 async function waitForRunToSettle(record: RunRecord) {
-  const deadline = Date.now() + 45_000;
+  const deadline = Date.now() + runResponseDeadlineMs;
   while (record.status === "running" && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
   if (record.status === "running") {
-    record.status = "failed";
-    record.currentStatus = "Run timed out before the serverless response deadline.";
+    record.currentStatus = "Run is still running; return this snapshot and poll the run endpoint.";
     record.events.push(createRunEvent("Orchestrator", "decision", record.currentStatus));
   }
 }
@@ -506,9 +543,9 @@ function classifyIntent(topic: string, history: ChatHistoryMessage[]): Intent {
   const asksRevise = /修改|完善|改写|优化|调整|返工|补充/i.test(topic);
   const asksWrite = /写|撰写|段落|摘要|引言|框架|提纲|标题/i.test(topic);
   const asksStatus = /进度|状态|做到哪|完成了什么|下一步|计划|phase/i.test(topic);
-  const asksClarify = /主题|选题|方向|范围|切入点|可行|你觉得|怎么研究|我想做.*研究|关于.*研究|TOD|交通导向|交通导向规划/i.test(topic);
+  const asksClarify = /主题|选题|方向|范围|切入点|可行|你觉得|怎么研究|我想研究|我想做.*研究|关于.*研究|TOD|交通导向|交通导向规划/i.test(topic);
 
-  if (asksForFullWorkflow || (!hasPriorConversation && /我想研究|帮我研究|写一篇|论文框架|文献综述/.test(topic))) {
+  if (asksForFullWorkflow || (!hasPriorConversation && /写一篇|论文框架|文献综述/.test(topic))) {
     return "full_workflow";
   }
   if (isCasualTurn) return "chitchat";
@@ -532,6 +569,15 @@ async function executeRun(record: RunRecord) {
     for (let turn = 0; turn < 10 && record.status === "running"; turn += 1) {
       const decision = dynamicOrchestratorDecide(record);
       record.events.push(createRunEvent("Orchestrator", "decision", decision.reason));
+
+      if (shouldCheckpointBeforeDecision(record, decision)) {
+        pauseForUser(
+          record,
+          "本轮已经完成一部分检索/证据工作。为了避免服务端请求超时，我先暂停在检查点；回复“继续”即可接着生成后续缺口分析、论文框架或评审结果。",
+          "Dynamic Orchestrator: checkpointed the workflow before the serverless response deadline.",
+        );
+        return;
+      }
 
       if (decision.type === "call_tool") {
         await runToolDecision(record, decision);
@@ -558,6 +604,13 @@ async function executeRun(record: RunRecord) {
     record.currentStatus = error instanceof Error ? error.message : "OpenAI Agent harness failed";
     record.events.push(createRunEvent("Orchestrator", "decision", record.currentStatus));
   }
+}
+
+function shouldCheckpointBeforeDecision(record: RunRecord, decision: OrchestratorDecision) {
+  if (record.intent !== "full_workflow") return false;
+  if (decision.type !== "call_tool" && decision.type !== "run_agent") return false;
+  if (!record.completedSteps.length && !record.liveToolContexts["paper-search"]) return false;
+  return Date.now() - record.responseWindowStartedAt >= workflowCheckpointAfterMs;
 }
 
 function orchestratorDecide(record: RunRecord): OrchestratorDecision {
@@ -1022,7 +1075,7 @@ async function runToolDecision(record: RunRecord, decision: Extract<Orchestrator
   record.events.push(createRunEvent("Tool", "tool_call", `Calling ${decision.tool} for query: ${decision.query}`));
 
   if (decision.tool === "paper_search") {
-    const result = await searchResearchSources(decision.query);
+    const result = await searchResearchSources(buildContextualSearchQuery(record, decision.query));
     record.toolTraces.push(...result.traces);
     record.liveSearchQuality = result.quality;
     record.liveToolContexts["paper-search"] = JSON.stringify(
@@ -1326,7 +1379,7 @@ function buildConversationalFallback(
   }
 
   if (record.intent === "research") {
-    const foundPapers = parseLivePapers(toolContext?.data);
+    const foundPapers = filterPapersForFallback(parseLivePapers(toolContext?.data), toolContext?.data);
     if (foundPapers.length) {
       return {
         summary: "Research Agent 已使用检索工具结果给出离线文献列表。",
@@ -1343,11 +1396,11 @@ function buildConversationalFallback(
     }
 
     return {
-      summary: "Research Agent 因模型不可用而暂停检索建议。",
+      summary: "Research Agent 因模型不可用或检索相关性不足而暂停检索建议。",
       artifact: [
         modelUnavailableIntro,
-        `你刚才输入的是：“${topic}”。由于无法调用模型，我不会生成关键词、文献方向或研究判断，避免把不相关主题强行套入回复。`,
-        "请稍后重试，或先补充明确关键词/研究对象后再发起检索。",
+        `你刚才输入的是：“${topic}”。当前没有足够可信的同主题文献可直接展示，我不会把不相关检索结果强行列为候选文献。`,
+        "请稍后重试，或补充明确关键词、案例地、研究对象后再发起检索。",
         offlineNote,
       ].join("\n"),
     };
@@ -1413,6 +1466,55 @@ function parseLivePapers(data?: string) {
   }
 }
 
+function parseLiveSearchPayload(data?: string) {
+  if (!data) return null as { papers?: ResearchPaper[]; query?: string } | null;
+  try {
+    return JSON.parse(data) as { papers?: ResearchPaper[]; query?: string };
+  } catch {
+    return null;
+  }
+}
+
+function buildContextualSearchQuery(record: RunRecord, query = record.topic) {
+  const recentUserContext = record.history
+    .slice(-8)
+    .filter((message) => message.role === "user")
+    .map((message) => message.body)
+    .join("\n");
+  return [recentUserContext, query].filter(Boolean).join("\n");
+}
+
+function filterPapersForFallback(papers: ResearchPaper[], data?: string) {
+  const payload = parseLiveSearchPayload(data);
+  const query = payload?.query ?? "";
+  const queryTokens = tokenizeSearchText(query);
+  if (!queryTokens.length) return papers;
+
+  const filtered = papers.filter((paper) => {
+    const paperTokens = tokenizeSearchText([paper.title, paper.abstract, paper.venue].filter(Boolean).join(" "));
+    return queryTokens.some((token) => paperTokens.includes(token));
+  });
+
+  return filtered.length >= 3 ? filtered : [];
+}
+
+function tokenizeSearchText(text: string) {
+  const normalized = text.toLowerCase();
+  const tokens = new Set<string>();
+  const phraseMap: Array<[RegExp, string[]]> = [
+    [/historic|heritage|conservation|regeneration|renewal|district|quarter|neighbou?rhood/g, ["historic", "heritage", "conservation", "regeneration", "district"]],
+    [/历史街区|历史文化街区|历史地段|保护更新|保护性更新|城市更新/g, ["historic", "heritage", "conservation", "regeneration", "district"]],
+    [/空间活化|空间活力|活力提升|公共空间|placemaking|vitality/g, ["public", "space", "vitality", "placemaking"]],
+    [/案例研究|案例|case stud(y|ies)/g, ["case", "study"]],
+  ];
+
+  for (const [pattern, mappedTokens] of phraseMap) {
+    if (pattern.test(normalized)) mappedTokens.forEach((token) => tokens.add(token));
+  }
+  for (const token of normalized.match(/[\p{L}\p{N}]{4,}/gu) ?? []) tokens.add(token);
+  return [...tokens];
+}
+
 function formatFallbackPaper(paper: ResearchPaper, index: number) {
   const meta = [paper.authors.slice(0, 3).join(", "), paper.year, paper.venue].filter(Boolean).join(" | ");
   const link = paper.doi ? `https://doi.org/${paper.doi}` : paper.url;
@@ -1431,7 +1533,7 @@ async function loadToolContext(record: RunRecord, step: RunStep) {
   }
 
   record.events.push(createRunEvent("Tool", "tool_call", "Searching OpenAlex, Semantic Scholar, and Crossref for live paper metadata."));
-  const result = await searchResearchSources(record.topic);
+  const result = await searchResearchSources(buildContextualSearchQuery(record));
   record.liveSearchQuality = result.quality;
   record.liveToolContexts["paper-search"] = JSON.stringify(
     {
@@ -1538,7 +1640,7 @@ async function callOpenAI(prompt: string): Promise<OpenAIResult> {
   let response: Response | undefined;
   let detail = "";
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < openAIAgentMaxAttempts; attempt += 1) {
     response = await fetchWithTimeout(
       "https://api.openai.com/v1/responses",
       {
@@ -1549,13 +1651,13 @@ async function callOpenAI(prompt: string): Promise<OpenAIResult> {
         },
         body,
       },
-      12000,
+      openAIAgentTimeoutMs,
     );
 
     if (response.ok) break;
 
     detail = await response.text().catch(() => "");
-    if (![429, 500, 502, 503, 504, 520].includes(response.status) || attempt === 2) break;
+    if (![429, 500, 502, 503, 504, 520].includes(response.status) || attempt === openAIAgentMaxAttempts - 1) break;
     await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
   }
 
@@ -1592,6 +1694,13 @@ async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: num
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function getEnvNumber(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseAgentOutput(text: string): AgentOutput {
@@ -1693,6 +1802,56 @@ function snapshotRun(record: RunRecord): RunSnapshot {
     requiresUserInput: record.status === "waiting_for_user",
     question: record.pendingQuestion,
     result: record.result,
+    resumeState: {
+      sessionId: record.sessionId,
+      topic: record.topic,
+      history: record.history,
+      memoryContext: record.memoryContext,
+      intent: record.intent,
+      createdAt: record.createdAt,
+      responseWindowStartedAt: record.responseWindowStartedAt,
+      currentIndex: record.currentIndex,
+      targetStepCount: record.targetStepCount,
+      steps: record.steps,
+      artifacts: record.artifacts,
+      liveToolContexts: record.liveToolContexts,
+      liveSearchQuality: record.liveSearchQuality,
+      reasoningSummaries: record.reasoningSummaries,
+      quickActions: record.quickActions,
+      userClarifications: record.userClarifications,
+    },
+  };
+}
+
+function hydrateRunRecord(snapshot: RunSnapshot): RunRecord | null {
+  const state = snapshot.resumeState;
+  if (!state) return null;
+
+  return {
+    id: snapshot.id,
+    sessionId: state.sessionId,
+    topic: state.topic,
+    history: state.history,
+    memoryContext: state.memoryContext,
+    intent: state.intent,
+    createdAt: state.createdAt,
+    responseWindowStartedAt: state.responseWindowStartedAt,
+    status: snapshot.status,
+    currentIndex: state.currentIndex,
+    currentStatus: snapshot.currentStatus,
+    targetStepCount: state.targetStepCount,
+    steps: state.steps,
+    completedSteps: snapshot.completedSteps,
+    artifacts: state.artifacts,
+    liveToolContexts: state.liveToolContexts,
+    liveSearchQuality: state.liveSearchQuality,
+    events: snapshot.events,
+    reasoningSummaries: state.reasoningSummaries,
+    toolTraces: snapshot.toolTraces,
+    quickActions: state.quickActions,
+    pendingQuestion: snapshot.question,
+    userClarifications: state.userClarifications,
+    result: snapshot.result,
   };
 }
 
