@@ -9,6 +9,8 @@ const runResponseDeadlineMs = getEnvNumber("RESEARCHFLOW_RUN_RESPONSE_DEADLINE_M
 const workflowCheckpointAfterMs = getEnvNumber("RESEARCHFLOW_WORKFLOW_CHECKPOINT_AFTER_MS", 35_000);
 const openAIAgentTimeoutMs = getEnvNumber("OPENAI_AGENT_TIMEOUT_MS", 18_000);
 const openAIAgentMaxAttempts = getEnvNumber("OPENAI_AGENT_MAX_ATTEMPTS", 2);
+const openAIBlueprintFallbackTimeoutMs = getEnvNumber("OPENAI_BLUEPRINT_FALLBACK_TIMEOUT_MS", 45_000);
+const openAIBlueprintFallbackMaxAttempts = getEnvNumber("OPENAI_BLUEPRINT_FALLBACK_MAX_ATTEMPTS", 3);
 
 export type AgentName =
   | "ResearchFlow"
@@ -1280,7 +1282,22 @@ async function runAgentStep(record: RunRecord, step: RunStep): Promise<AgentOutp
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "OpenAI call failed";
-    record.events.push(createRunEvent(step.agent, "agent_step", `Using local fallback because the model call failed: ${message}`));
+    if (record.intent === "full_workflow" && step.output === "paper-blueprint.md") {
+      try {
+        record.events.push(createRunEvent(step.agent, "agent_step", `Primary blueprint model call failed; retrying with compact LLM fallback: ${message}`));
+        const rescue = await callOpenAIBlueprintFallback(record, toolContext, message);
+        return {
+          summary: "已通过压缩版大语言模型兜底生成可下载研究蓝图。",
+          artifact: rescue.text,
+          reasoningSummary: rescue.reasoningSummary ?? `Compact LLM fallback generated paper-blueprint.md after primary failure: ${message}`,
+          toolTraces: toolContext.traces,
+        };
+      } catch (fallbackError) {
+        const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : "Compact blueprint fallback failed";
+        record.events.push(createRunEvent(step.agent, "agent_step", `Compact LLM blueprint fallback failed: ${fallbackMessage}`));
+      }
+    }
+    record.events.push(createRunEvent(step.agent, "agent_step", `Using deterministic fallback because all model calls failed: ${message}`));
     return {
       ...buildLocalFallbackOutput(record, step, toolContext, message),
       toolTraces: toolContext.traces,
@@ -1918,6 +1935,135 @@ async function callOpenAI(prompt: string): Promise<OpenAIResult> {
     .join("\n");
 
   return { text, reasoningSummary: reasoningSummary || undefined };
+}
+
+async function callOpenAIBlueprintFallback(
+  record: RunRecord,
+  toolContext: { traces: ResearchToolTrace[]; data: string },
+  primaryFailure: string,
+): Promise<OpenAIResult> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const model = process.env.OPENAI_BLUEPRINT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-5.5";
+  if (!apiKey) throw new Error("OPENAI_API_KEY is missing in .env.local");
+
+  const prompt = buildCompactBlueprintPrompt(record, toolContext, primaryFailure);
+  const body = JSON.stringify({
+    model,
+    input: prompt,
+    max_output_tokens: Number(process.env.OPENAI_BLUEPRINT_FALLBACK_MAX_OUTPUT_TOKENS || 3500),
+  });
+
+  let response: Response | undefined;
+  let detail = "";
+
+  for (let attempt = 0; attempt < openAIBlueprintFallbackMaxAttempts; attempt += 1) {
+    response = await fetchWithTimeout(
+      "https://api.openai.com/v1/responses",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body,
+      },
+      openAIBlueprintFallbackTimeoutMs,
+    );
+
+    if (response.ok) break;
+
+    detail = await response.text().catch(() => "");
+    if (![429, 500, 502, 503, 504, 520].includes(response.status) || attempt === openAIBlueprintFallbackMaxAttempts - 1) break;
+    await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+  }
+
+  if (!response?.ok) {
+    throw new Error(`OpenAI compact blueprint fallback failed: ${response?.status ?? "unknown"} ${detail.slice(0, 220)}`);
+  }
+
+  const data = (await response.json()) as {
+    output_text?: string;
+    output?: Array<{
+      type?: string;
+      summary?: Array<{ text?: string }>;
+      content?: Array<{ text?: string }>;
+    }>;
+  };
+
+  const text =
+    data.output_text || data.output?.flatMap((item) => item.content ?? []).map((item) => item.text ?? "").join("") || "";
+  if (!text.trim()) throw new Error("OpenAI compact blueprint fallback returned empty text");
+
+  const reasoningSummary = data.output
+    ?.filter((item) => item.type === "reasoning")
+    .flatMap((item) => item.summary ?? [])
+    .map((item) => item.text ?? "")
+    .filter(Boolean)
+    .join("\n");
+
+  return { text: normalizeBlueprintMarkdown(text), reasoningSummary: reasoningSummary || undefined };
+}
+
+function buildCompactBlueprintPrompt(
+  record: RunRecord,
+  toolContext: { traces: ResearchToolTrace[]; data: string },
+  primaryFailure: string,
+) {
+  const papers = parseLivePapers(toolContext.data).slice(0, 10).map((paper, index) => ({
+    id: index + 1,
+    title: paper.title,
+    year: paper.year,
+    venue: paper.venue,
+    doi: paper.doi,
+    url: paper.url,
+    authors: paper.authors.slice(0, 4),
+    abstract: paper.abstract ? paper.abstract.slice(0, 550) : undefined,
+  }));
+  const compactArtifacts = {
+    researchBrief: truncateText(record.artifacts["research-brief.json"], 1500),
+    paperPool: truncateText(record.artifacts["paper-pool.json"], 1500),
+    evidencePack: truncateText(record.artifacts["evidence-pack.json"], 1800),
+    gapAnalysis: truncateText(record.artifacts["gap-analysis.json"], 1500),
+  };
+
+  return [
+    "你是 ResearchFlow 的 Writer/Compiler Agent。现在主流程的大 prompt 或检索整理步骤失败了，但用户明确需要一份真正可执行、可下载的研究蓝图。",
+    "请直接基于用户当前题目、澄清历史、可用候选文献和已有中间 artifacts 生成 paper-blueprint.md。",
+    "严禁使用无关样例题目；不要套用 TOD、交通、站点或居民出行内容，除非用户题目明确提到。",
+    "如果候选文献不足，可以用通用学术知识生成蓝图，但必须标注哪些部分需要后续文献复核。不要把错误日志丢给用户当结果。",
+    "输出必须是 Markdown，不要 JSON，不要代码块。",
+    "",
+    "蓝图必须包含这些小节：",
+    "1. 选题定位",
+    "2. 核心研究问题",
+    "3. 理论基础与分析框架",
+    "4. 核心变量/观察维度",
+    "5. 研究方法与资料来源",
+    "6. 案例选择建议",
+    "7. 论文结构",
+    "8. 预期贡献",
+    "9. 风险与局限",
+    "10. 可引用候选文献与下一步执行清单",
+    "",
+    `用户当前题目：${record.topic}`,
+    `最近对话：${JSON.stringify(record.history.slice(-8), null, 2)}`,
+    `用户澄清：${record.userClarifications.join("\n") || "无"}`,
+    `主流程失败原因：${primaryFailure}`,
+    `检索工具状态：${toolContext.traces.map((trace) => `${trace.tool}: ${trace.status}; ${trace.summary}`).join("\n") || "无"}`,
+    `候选文献：${JSON.stringify(papers, null, 2)}`,
+    `已有中间材料：${JSON.stringify(compactArtifacts, null, 2)}`,
+  ].join("\n\n");
+}
+
+function normalizeBlueprintMarkdown(text: string) {
+  const cleaned = text.replace(/^```(?:markdown)?\s*/i, "").replace(/```$/i, "").trim();
+  if (/^#\s+/.test(cleaned)) return cleaned;
+  return `# 研究蓝图\n\n${cleaned}`;
+}
+
+function truncateText(value: string | undefined, maxLength: number) {
+  if (!value) return "";
+  return value.length > maxLength ? `${value.slice(0, maxLength)}\n...[truncated]` : value;
 }
 
 async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number) {
