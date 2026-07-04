@@ -1,0 +1,11 @@
+node_modules
+.next
+.next-*
+dev-server*.log
+prod-server*.log
+*.tsbuildinfo
+.env*
+.agents
+.codex
+sample-project/runs
+sample-project/memory

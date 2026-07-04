@@ -1,0 +1,18 @@
+{
+  "revisions": [
+    {
+      "issueType": "method_issue",
+      "returnedTo": "Writer/Compiler Agent",
+      "skill": "paper-blueprint-writing-skill",
+      "changedArtifact": "paper-blueprint.md",
+      "changeSummary": "补充数据可得性检查、变量表和谨慎因果表述。"
+    },
+    {
+      "issueType": "gap_issue",
+      "returnedTo": "Research Agent",
+      "skill": "gap-analysis-skill",
+      "changedArtifact": "internal/gap-analysis.json",
+      "changeSummary": "将gap收敛为步行可达性的中介机制。"
+    }
+  ]
+}

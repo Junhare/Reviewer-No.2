@@ -1,0 +1,19 @@
+{
+  "issues": [
+    {
+      "type": "method_issue",
+      "question": "如果缺少个体出行行为数据，是否只能做空间形态评价？",
+      "route": "Writer/Compiler Agent"
+    },
+    {
+      "type": "gap_issue",
+      "question": "步行可达性中介机制是否真的不足，还是当前论文池太小？",
+      "route": "Research Agent"
+    },
+    {
+      "type": "scope_issue",
+      "question": "是否需要排除房价、商业开发和客流绩效？",
+      "route": "Clarifier Agent"
+    }
+  ]
+}

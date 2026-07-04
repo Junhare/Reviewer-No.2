@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id
+  email        String    @unique
+  name         String
+  passwordHash String?
+  createdAt    DateTime  @default(now())
+  projects     Project[]
+}
+
+model Project {
+  id        String    @id
+  ownerId   String
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  title     String
+  topic     String
+  status    String    @default("active")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  runs      Run[]
+  artifacts Artifact[]
+
+  @@index([ownerId, updatedAt])
+}
+
+model Run {
+  id            String      @id
+  ownerId       String
+  projectId     String
+  project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  topic         String
+  status        String
+  currentStatus String
+  snapshot      Json
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  steps         AgentStep[]
+  toolTraces    ToolTrace[]
+  artifacts     Artifact[]
+
+  @@index([ownerId, projectId, updatedAt])
+}
+
+model AgentStep {
+  id         String   @id
+  runId      String
+  run        Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  agent      String
+  skill      String
+  status     String
+  summary    String?
+  outputKind String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([runId, updatedAt])
+}
+
+model ToolTrace {
+  id        String   @id
+  runId     String
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tool      String
+  query     String
+  status    String
+  summary   String
+  createdAt DateTime @default(now())
+
+  @@index([runId, createdAt])
+}
+
+model Artifact {
+  id        String   @id
+  ownerId   String
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runId     String?
+  run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+  kind      String
+  fileName  String
+  content   String
+  version   Int
+  createdAt DateTime @default(now())
+
+  @@index([ownerId, projectId, kind, createdAt])
+}

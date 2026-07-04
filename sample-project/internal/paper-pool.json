@@ -1,0 +1,45 @@
+{
+  "selectionCriteria": [
+    "建成环境与出行行为基础理论",
+    "TOD与轨道站点地区",
+    "步行可达性或土地利用交通整合"
+  ],
+  "papers": [
+    {
+      "title": "Travel demand and the 3Ds: Density, diversity, and design",
+      "year": 1997,
+      "sourceUrl": "https://doi.org/10.1016/S1361-9209(97)00009-6",
+      "reason": "提供建成环境变量的经典框架。"
+    },
+    {
+      "title": "Travel and the Built Environment: A Meta-Analysis",
+      "year": 2010,
+      "sourceUrl": "https://doi.org/10.1080/01944361003766766",
+      "reason": "支持变量选择和文献综述结构。"
+    },
+    {
+      "title": "Transit-oriented development's ridership bonus: a product of self-selection and public policies",
+      "year": 2007,
+      "sourceUrl": "https://doi.org/10.1068/a38377",
+      "reason": "提示TOD行为效果中的自选择和政策解释风险。"
+    },
+    {
+      "title": "Rail and property development in Hong Kong: Experiences and extensions",
+      "year": 2009,
+      "sourceUrl": "https://doi.org/10.1177/0042098009339431",
+      "reason": "提供轨道与站点开发整合案例。"
+    },
+    {
+      "title": "The analysis of transit-oriented development (TOD) in Washington, D.C. and Baltimore metropolitan areas",
+      "year": 2014,
+      "sourceUrl": "https://doi.org/10.1016/j.tranpol.2013.11.009",
+      "reason": "提供TOD跨城市实证分析线索。"
+    },
+    {
+      "title": "Transit-oriented development, integration of land use and transport, and pedestrian accessibility",
+      "year": 2015,
+      "sourceUrl": "https://doi.org/10.1016/j.jtrangeo.2014.11.008",
+      "reason": "将土地利用交通整合与步行可达性连接起来。"
+    }
+  ]
+}

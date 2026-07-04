@@ -1,0 +1,17 @@
+{
+  "projectId": "tod-station-area",
+  "evidenceSummary": {
+    "methods": ["建成环境指标建模", "元分析", "TOD案例比较", "可达性分析"],
+    "variables": ["density", "diversity", "design", "walkability", "distance to transit", "travel behavior"],
+    "findings": [
+      "建成环境变量可用于解释出行行为差异。",
+      "TOD行为效果需要注意居民自选择和政策背景。",
+      "步行可达性可以作为土地利用与出行行为之间的机制变量。"
+    ],
+    "limitations": [
+      "当前论文池仍需扩展近期研究。",
+      "没有行为数据时不能强因果推断。",
+      "不同城市制度环境会影响TOD效果外推。"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "topic": "TOD模式下城市轨道交通站点周边土地利用与出行行为研究",
+  "objective": "解释站点周边建成环境如何通过步行可达性影响出行行为。",
+  "scope": ["轨道交通站点地区", "建成环境", "步行可达性", "出行行为"],
+  "keywords": [
+    "TOD",
+    "transit-oriented development",
+    "station area",
+    "built environment",
+    "walkability",
+    "travel behavior"
+  ],
+  "exclusions": ["房价主导研究", "商业开发绩效", "完整论文自动生成", "无来源文献结论"],
+  "successCriteria": [
+    "形成清晰研究问题",
+    "整理真实论文来源",
+    "生成可继续写作的详细论文框架"
+  ]
+}

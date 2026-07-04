@@ -1,0 +1,556 @@
+﻿"use client";
+
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, Search, Send, User } from "lucide-react";
+
+type Message = {
+  id: string;
+  role: "user" | "agent";
+  agent?: string;
+  body: string;
+  logs?: string[];
+  reasoningSummary?: string;
+  toolTraces?: ToolTrace[];
+  quickActions?: QuickAction[];
+  pending?: boolean;
+  artifact?: { file: string; href: string; summary: string };
+};
+
+type QuickAction = { label: string; value: string };
+type ToolTrace = { tool: string; query: string; status: "completed" | "failed" | "skipped"; summary: string };
+type RunEvent = { id: string; actor: string; type: "decision" | "agent_step" | "tool_call" | "reasoning" | "memory"; message: string; createdAt: string };
+type RunStep = { agent: string; skill: string; statusText: string; output: string; summary: string };
+type RunSnapshot = {
+  id: string;
+  status: "running" | "waiting_for_user" | "completed" | "failed";
+  currentStatus: string;
+  elapsedSeconds: number;
+  progress: { current: number; total: number };
+  activeStep?: RunStep;
+  completedSteps: RunStep[];
+  events: RunEvent[];
+  reasoningSummary?: string;
+  toolTraces: ToolTrace[];
+  requiresUserInput?: boolean;
+  question?: string;
+  result?: {
+    title: string;
+    logs: string[];
+    quickActions?: QuickAction[];
+    artifact?: { file: string; href: string; summary: string };
+  };
+};
+
+type ProjectSummary = { id: string; title: string; topic: string; status: string; updatedAt: string };
+type ConversationSummary = {
+  id: string;
+  projectId?: string;
+  title: string;
+  messages: Array<{ id: string; role: "user" | "agent"; agent?: string; body: string; logs?: string[]; createdAt: string }>;
+  updatedAt: string;
+};
+type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
+
+const authFlag = "researchflow-demo-authenticated";
+const demoPrompt =
+  "Please help me turn this vague research idea into a complete paper blueprint: I want to study how transit-oriented development around urban rail stations affects land use and resident travel behavior, but I am not sure how to narrow the scope.";
+
+export function WorkspaceChat() {
+  const [authReady, setAuthReady] = useState(() => typeof window !== "undefined" && window.localStorage.getItem(authFlag) === "true");
+  const [authMode, setAuthMode] = useState<"login" | "register">("register");
+  const [authError, setAuthError] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isRunning, setIsRunning] = useState(false);
+  const [progressLog, setProgressLog] = useState("Ready");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [sidebarQuery, setSidebarQuery] = useState("");
+  const [pendingRunId, setPendingRunId] = useState<string | null>(null);
+
+  const tabSessionRef = useRef(createEphemeralSessionId());
+  const messageCounter = useRef(0);
+  const messageStreamRef = useRef<HTMLDivElement | null>(null);
+  const persistTimerRef = useRef<number | null>(null);
+
+  const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId) ?? null;
+  const currentProjectId = activeConversation?.projectId ?? activeProjectId;
+  const currentSessionId = useMemo(() => {
+    if (currentProjectId) return `project-${currentProjectId}`;
+    if (activeConversationId) return `conversation-${activeConversationId}`;
+    return tabSessionRef.current;
+  }, [activeConversationId, currentProjectId]);
+  const currentAgent = isRunning ? progressLog : pendingRunId ? "Waiting for clarification" : "Ready";
+  const visibleProjects = filterByQuery(projects, sidebarQuery, (project) => `${project.title} ${project.topic}`);
+  const visibleConversations = filterByQuery(conversations, sidebarQuery, (conversation) => conversation.title);
+
+  useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
+    async function loadData() {
+      const [projectResponse, conversationResponse] = await Promise.all([fetch("/api/projects"), fetch("/api/conversations")]);
+      if (cancelled) return;
+      if (projectResponse.ok) setProjects(((await projectResponse.json()) as { projects: ProjectSummary[] }).projects);
+      if (conversationResponse.ok) {
+        const data = (await conversationResponse.json()) as { conversations: ConversationSummary[] };
+        setConversations(data.conversations);
+        if (data.conversations[0]) {
+          setActiveConversationId(data.conversations[0].id);
+          setActiveProjectId(data.conversations[0].projectId ?? null);
+          setMessages(data.conversations[0].messages);
+        }
+      }
+    }
+    void loadData();
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady]);
+
+  useEffect(() => {
+    const stream = messageStreamRef.current;
+    if (stream) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+  }, [messages, isRunning, progressLog]);
+
+  useEffect(() => {
+    if (!activeConversationId || !messages.length) return;
+    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = window.setTimeout(() => {
+      persistConversation(activeConversationId, activeConversation?.title, messages).then((updated) => {
+        if (!updated) return;
+        setConversations((current) => current.map((conversation) => (conversation.id === updated.id ? updated : conversation)));
+      });
+    }, 350);
+    return () => {
+      if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    };
+  }, [activeConversation?.title, activeConversationId, messages]);
+
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAuthError("");
+    const response = await fetch(authMode === "register" ? "/api/auth/register" : "/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: authEmail, name: authName, password: authPassword }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      setAuthError(data?.error ?? "Authentication failed.");
+      return;
+    }
+    window.localStorage.setItem(authFlag, "true");
+    setAuthReady(true);
+  }
+
+  async function handleNewProject() {
+    const topic = window.prompt("Project topic")?.trim();
+    if (!topic) return;
+    const title = window.prompt("Project title", summarizeConversationTitle(topic)) ?? undefined;
+    const response = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title, topic }),
+    });
+    if (!response.ok) return;
+    const data = (await response.json()) as { project: ProjectSummary };
+    setProjects((current) => [data.project, ...current]);
+    setActiveProjectId(data.project.id);
+    setActiveConversationId(null);
+    setMessages([]);
+  }
+
+  async function handleNewChat(projectId?: string) {
+    const title = window.prompt("Chat name", projectId ? "New project chat" : "New chat")?.trim();
+    if (!title) return;
+    const response = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId, title, messages: [] }),
+    });
+    if (!response.ok) return;
+    const data = (await response.json()) as { conversation: ConversationSummary };
+    setConversations((current) => [data.conversation, ...current]);
+    setActiveConversationId(data.conversation.id);
+    setActiveProjectId(projectId ?? null);
+    setMessages([]);
+  }
+
+  function selectProject(project: ProjectSummary) {
+    setActiveProjectId(project.id);
+    setActiveConversationId(null);
+    setMessages([]);
+  }
+
+  function selectConversation(conversation: ConversationSummary) {
+    setActiveConversationId(conversation.id);
+    setActiveProjectId(conversation.projectId ?? null);
+    setMessages(conversation.messages);
+  }
+
+  async function submitMessage(rawInput: string) {
+    const trimmed = rawInput.trim();
+    if (!trimmed || isRunning) return;
+
+    messageCounter.current += 1;
+    const userMessageId = `user-request-${messageCounter.current}`;
+    const responseMessageId = `run-response-${messageCounter.current}`;
+    const history = messages.map((message) => ({
+      role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+      body: [message.body, ...(message.logs ?? [])].join("\n"),
+    }));
+    const routerDecision = await routeConversationWithLLM(trimmed, Boolean(pendingRunId), history);
+    const isResume = Boolean(pendingRunId) && routerDecision.route === "resume_pending";
+
+    setMessages((current) => [
+      ...current,
+      { id: userMessageId, role: "user", body: trimmed },
+      { id: responseMessageId, role: "agent", agent: "ResearchFlow", body: "", logs: [`Router: ${routerDecision.reason}`], pending: true },
+    ]);
+    setInput("");
+    setIsRunning(true);
+
+    if (routerDecision.route === "conversation" || routerDecision.route === "task_control") {
+      if (routerDecision.route === "task_control") setPendingRunId(null);
+      setProgressLog("Conversation Router");
+      await typeLocalReply(responseMessageId, routerDecision.reply || "I will treat this as a normal conversation turn.");
+      setIsRunning(false);
+      setProgressLog("Ready");
+      return;
+    }
+
+    try {
+      setProgressLog(isResume ? "Resuming run" : "Starting run");
+      const run = isResume
+        ? await resumeExistingRun(pendingRunId as string, trimmed)
+        : await createNewRun(history, currentSessionId, trimmed, currentProjectId);
+      applyRunSnapshot(run, responseMessageId);
+      if (run.status === "running") pollRun(run.id, responseMessageId);
+      else settleRunState(run);
+    } catch {
+      setIsRunning(false);
+      setProgressLog("Run failed");
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === responseMessageId
+            ? { ...message, body: "Run failed. Check API routes and server environment variables.", pending: false }
+            : message,
+        ),
+      );
+    }
+  }
+
+  function applyRunSnapshot(run: RunSnapshot, responseMessageId: string) {
+    setProgressLog(run.currentStatus);
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === responseMessageId
+          ? {
+              ...message,
+              body: run.question ?? run.result?.title ?? run.currentStatus,
+              logs: run.result?.logs ?? formatRunEvents(run),
+              reasoningSummary: run.reasoningSummary,
+              toolTraces: run.toolTraces,
+              quickActions: run.result?.quickActions,
+              pending: run.status === "running",
+              artifact: run.result?.artifact,
+            }
+          : message,
+      ),
+    );
+  }
+
+  function pollRun(runId: string, responseMessageId: string) {
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/runs/${runId}`);
+        if (!response.ok) throw new Error("Failed to read run");
+        const run = (await response.json()) as RunSnapshot;
+        applyRunSnapshot(run, responseMessageId);
+        if (run.status !== "running") {
+          window.clearInterval(interval);
+          settleRunState(run);
+        }
+      } catch {
+        window.clearInterval(interval);
+        setIsRunning(false);
+        setProgressLog("Run failed");
+      }
+    }, 650);
+  }
+
+  function settleRunState(run: RunSnapshot) {
+    setIsRunning(false);
+    if (run.status === "waiting_for_user") {
+      setPendingRunId(run.id);
+      setProgressLog("Waiting for clarification");
+      return;
+    }
+    setPendingRunId(null);
+    setProgressLog(run.status === "completed" ? "Paper Blueprint ready" : "Run failed");
+  }
+
+  async function typeLocalReply(messageId: string, text: string) {
+    for (const index of Array.from({ length: text.length }, (_, offset) => offset + 1)) {
+      await new Promise((resolve) => window.setTimeout(resolve, 8));
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId ? { ...message, body: text.slice(0, index), pending: index < text.length } : message,
+        ),
+      );
+    }
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    void submitMessage(input);
+  }
+
+  if (!authReady) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel">
+          <div className="brand auth-brand">
+            <span className="brand-mark">RF</span>
+            <div>
+              <strong>ResearchFlow Agent</strong>
+              <span>Academic planning workspace</span>
+            </div>
+          </div>
+          <h1>{authMode === "register" ? "Create an account" : "Sign in"}</h1>
+          <p className="subtle">This lightweight gate keeps provider keys server-side while preserving separate local workspaces.</p>
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            {authMode === "register" ? (
+              <label>
+                Name
+                <input onChange={(event) => setAuthName(event.target.value)} placeholder="Researcher" value={authName} />
+              </label>
+            ) : null}
+            <label>
+              Email
+              <input onChange={(event) => setAuthEmail(event.target.value)} placeholder="researcher@example.com" type="email" value={authEmail} />
+            </label>
+            <label>
+              Password
+              <input onChange={(event) => setAuthPassword(event.target.value)} placeholder="8+ characters" type="password" value={authPassword} />
+            </label>
+            {authError ? <p className="auth-error">{authError}</p> : null}
+            <button className="button primary" type="submit">
+              <LogIn size={16} /> {authMode === "register" ? "Register" : "Sign in"}
+            </button>
+          </form>
+          <button className="link-button" onClick={() => setAuthMode(authMode === "register" ? "login" : "register")} type="button">
+            {authMode === "register" ? "Already have an account? Sign in" : "Need an account? Register"}
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="chat-shell">
+      <aside className="chat-sidebar">
+        <div className="sidebar-brand">
+          <span className="brand-mark">RF</span>
+          <div>
+            <strong>ResearchFlow</strong>
+            <span>AI research planning</span>
+          </div>
+        </div>
+        <button className="sidebar-action" onClick={() => void handleNewChat()} type="button">
+          <History size={16} /> New chat
+        </button>
+        <button className="sidebar-action ghost" onClick={() => void handleNewProject()} type="button">
+          <FolderPlus size={16} /> New project
+        </button>
+        <label className="sidebar-search">
+          <Search size={15} />
+          <input onChange={(event) => setSidebarQuery(event.target.value)} placeholder="Search" value={sidebarQuery} />
+        </label>
+        <section className="sidebar-section">
+          <div className="sidebar-heading">Projects</div>
+          <div className="project-list">
+            {visibleProjects.map((project) => (
+              <div className={project.id === activeProjectId ? "sidebar-row active" : "sidebar-row"} key={project.id}>
+                <button className="sidebar-row-main" onClick={() => selectProject(project)} type="button">
+                  <span>{project.title}</span>
+                </button>
+                <a className="icon-button" href={`/projects/${project.id}`} title="Project page">
+                  <FileText size={15} />
+                </a>
+              </div>
+            ))}
+            {!visibleProjects.length ? <p className="sidebar-empty">No projects yet.</p> : null}
+          </div>
+        </section>
+        <section className="sidebar-section">
+          <div className="sidebar-heading">Chats</div>
+          <div className="project-list">
+            {visibleConversations.map((conversation) => (
+              <div className={conversation.id === activeConversationId ? "sidebar-row active" : "sidebar-row"} key={conversation.id}>
+                <button className="sidebar-row-main" onClick={() => selectConversation(conversation)} type="button">
+                  <span>{conversation.title}</span>
+                </button>
+              </div>
+            ))}
+            {!visibleConversations.length ? <p className="sidebar-empty">No chats yet.</p> : null}
+          </div>
+        </section>
+        <div className="sidebar-footer">
+          <User size={16} /> Account active
+        </div>
+      </aside>
+
+      <section className="chat-main">
+        <header className="chat-header">
+          <div>
+            <p className="eyebrow">{activeProject ? `Project / ${activeProject.title}` : "Chat workspace"}</p>
+            <h1>{activeConversation?.title ?? activeProject?.title ?? "Research workspace"}</h1>
+            <p>Enter a research idea. Orchestrator will route agents, call literature tools, and pause for confirmation at risky checkpoints.</p>
+          </div>
+          <div className="run-status">
+            {isRunning ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
+            <span>{currentAgent}</span>
+          </div>
+        </header>
+
+        <div className="message-stream" ref={messageStreamRef}>
+          {!messages.length ? (
+            <article className="empty-state">
+              <h2>Start with a vague research idea</h2>
+              <p>ResearchFlow turns early research uncertainty into a traceable paper blueprint workflow.</p>
+              <button className="button primary" onClick={() => setInput(demoPrompt)} type="button">
+                Use sample prompt
+              </button>
+            </article>
+          ) : null}
+          {messages.map((message) => (
+            <article className={`message ${message.role}`} key={message.id}>
+              {message.role === "agent" ? (
+                <div className="message-avatar agent-avatar">{message.pending ? <Loader2 className="spin" size={16} /> : <Bot size={16} />}</div>
+              ) : null}
+              <div className={message.pending ? "message-body transient" : "message-body"}>
+                <div className="message-meta">
+                  <strong>{message.role === "user" ? "You" : message.agent ?? "ResearchFlow"}</strong>
+                  {message.pending ? <span>Running</span> : null}
+                </div>
+                {message.logs?.length ? <div className="message-logs">{message.logs.slice(-8).map((log, index) => <span key={`${message.id}-${index}`}>{log}</span>)}</div> : null}
+                <p className="message-text">{message.body}</p>
+                {message.toolTraces?.length ? (
+                  <div className="tool-trace-list">
+                    {message.toolTraces.map((trace, index) => (
+                      <div className="tool-trace" key={`${trace.tool}-${index}`}>
+                        <strong>{trace.tool} · {trace.status}</strong>
+                        <span>{trace.query}</span>
+                        <span>{trace.summary}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {message.reasoningSummary ? <details className="reasoning-panel"><summary>Reasoning summary</summary><p>{message.reasoningSummary}</p></details> : null}
+                {message.quickActions?.length ? (
+                  <div className="quick-action-list">
+                    {message.quickActions.map((action) => <button disabled={isRunning} key={action.label} onClick={() => void submitMessage(action.value)} type="button">{action.label}</button>)}
+                  </div>
+                ) : null}
+                {message.artifact ? (
+                  <a className="file-card" href={message.artifact.href}>
+                    <FileText size={18} />
+                    <span><strong>{message.artifact.file}</strong><small>{message.artifact.summary}</small></span>
+                    <Download size={16} />
+                  </a>
+                ) : null}
+              </div>
+              {message.role === "user" ? <div className="message-avatar user-avatar"><User size={16} /></div> : null}
+            </article>
+          ))}
+        </div>
+
+        <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void submitMessage(input); }}>
+          <textarea
+            aria-label="Research request"
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={handleComposerKeyDown}
+            placeholder={pendingRunId ? "Answer the Orchestrator clarification to resume this run." : "Enter a research idea, e.g. TOD around rail stations and resident travel behavior..."}
+            rows={2}
+            value={input}
+          />
+          <button className="send-button" disabled={isRunning || !input.trim()} type="submit"><Send size={17} /></button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+async function createNewRun(history: Array<{ role: "user" | "assistant"; body: string }>, sessionId: string, topic: string, projectId: string | null) {
+  const response = await fetch("/api/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ history, projectId, sessionId, topic }) });
+  if (!response.ok) throw new Error("Failed to create run");
+  return (await response.json()) as RunSnapshot;
+}
+
+async function resumeExistingRun(runId: string, answer: string) {
+  const response = await fetch(`/api/runs/${runId}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer }) });
+  if (!response.ok) throw new Error("Failed to resume run");
+  return (await response.json()) as RunSnapshot;
+}
+
+async function persistConversation(conversationId: string, currentTitle: string | undefined, messages: Message[]) {
+  const firstUserMessage = messages.find((message) => message.role === "user")?.body.trim();
+  const shouldAutoname = !currentTitle || currentTitle === "New chat" || currentTitle === "New project chat";
+  const title = shouldAutoname && firstUserMessage ? summarizeConversationTitle(firstUserMessage) : undefined;
+  const response = await fetch(`/api/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      title,
+      messages: messages.map((message) => ({ id: message.id, role: message.role, agent: message.agent, body: message.body, logs: message.logs, createdAt: new Date().toISOString() })),
+    }),
+  });
+  if (!response.ok) return null;
+  return ((await response.json()) as { conversation: ConversationSummary }).conversation;
+}
+
+async function routeConversationWithLLM(input: string, hasPendingRun: boolean, recentHistory: Array<{ role: "user" | "assistant"; body: string }>): Promise<RouterDecision> {
+  try {
+    const response = await fetch("/api/router", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input, hasPendingRun, recentHistory }) });
+    if (!response.ok) throw new Error("Router request failed");
+    return (await response.json()) as RouterDecision;
+  } catch {
+    if (hasPendingRun) return { intent: "answer_pending_question", route: "resume_pending", confidence: 0.65, reply: "", reason: "Router fallback treated the input as a clarification answer." };
+    if (looksLikeResearchRequest(input)) return { intent: "research_request", route: "researchflow", confidence: 0.7, reply: "", reason: "Router fallback matched research keywords." };
+    return { intent: "ordinary_chat", route: "conversation", confidence: 0.5, reply: "I will treat this as a normal conversation turn. Enter a research topic to start the agent workflow.", reason: "Router fallback used conservative conversation route." };
+  }
+}
+
+function filterByQuery<T>(items: T[], query: string, getText: (item: T) => string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return items;
+  return items.filter((item) => getText(item).toLowerCase().includes(normalizedQuery));
+}
+
+function summarizeConversationTitle(text: string) {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > 36 ? `${compact.slice(0, 36)}...` : compact || "New chat";
+}
+
+function looksLikeResearchRequest(input: string) {
+  return /research|paper|article|literature|review|blueprint|method|data|model|TOD|transit|论文|文献|研究|选题|框架|方法|变量|数据|综述/i.test(input);
+}
+
+function createEphemeralSessionId() {
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatRunEvents(run: RunSnapshot) {
+  if (run.requiresUserInput && run.question) return [...run.events.slice(-5).map((event) => `${event.actor}: ${event.message}`), "Orchestrator paused the run for confirmation."];
+  if (!run.events.length) return [`Running for ${run.elapsedSeconds}s.`, run.activeStep ? `${run.activeStep.agent} is producing ${run.activeStep.output}.` : "Orchestrator is routing the task."];
+  return run.events.slice(-6).map((event) => `${event.actor}: ${event.message}`);
+}
