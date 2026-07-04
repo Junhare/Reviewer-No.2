@@ -530,7 +530,7 @@ function classifyIntent(topic: string, history: ChatHistoryMessage[]): Intent {
     .map((message) => message.body)
     .join("\n");
   const hasPriorConversation = history.length > 0;
-  const asksBlueprint = /蓝图|研究蓝图|论文蓝图|生成.*(蓝图|框架)|输出.*(蓝图|框架)|可下载.*(蓝图|文件)|paper-blueprint/i.test(topic);
+  const asksBlueprint = isExplicitBlueprintRequestText(topic);
   const answersBlueprintClarification =
     hasPriorConversation &&
     /蓝图|研究蓝图|生成蓝图|可生成蓝图|论文层级|研究重点方向|方法偏好|研究对象范围|paper-blueprint/i.test(recentHistoryText) &&
@@ -568,6 +568,18 @@ function classifyIntent(topic: string, history: ChatHistoryMessage[]): Intent {
   if (asksWrite) return "write";
   if (asksClarify) return "clarify";
   return hasPriorConversation ? "clarify" : "status";
+}
+
+function isExplicitBlueprintRequestText(text: string) {
+  return /蓝图|研究蓝图|论文蓝图|生成.*(蓝图|框架)|输出.*(蓝图|框架)|可下载.*(蓝图|文件)|paper-blueprint/i.test(text);
+}
+
+function isExplicitBlueprintRequest(record: RunRecord) {
+  const conversationText = record.history
+    .slice(-6)
+    .map((message) => message.body)
+    .join("\n");
+  return isExplicitBlueprintRequestText(`${record.topic}\n${conversationText}`);
 }
 
 export function getRun(id: string) {
@@ -620,6 +632,7 @@ async function executeRun(record: RunRecord) {
 
 function shouldCheckpointBeforeDecision(record: RunRecord, decision: OrchestratorDecision) {
   if (record.intent !== "full_workflow") return false;
+  if (isExplicitBlueprintRequest(record)) return false;
   if (decision.type !== "call_tool" && decision.type !== "run_agent") return false;
   if (!record.completedSteps.length && !record.liveToolContexts["paper-search"]) return false;
   return Date.now() - record.responseWindowStartedAt >= workflowCheckpointAfterMs;
@@ -684,6 +697,13 @@ function orchestratorDecide(record: RunRecord): OrchestratorDecision {
       type: "run_agent",
       step: buildWorkflowStep("blueprint-draft"),
       reason: "The evidence pack exists and Writer gate passed, so Writer/Compiler Agent can draft the paper blueprint.",
+    };
+  }
+
+  if (isExplicitBlueprintRequest(record)) {
+    return {
+      type: "final",
+      reason: "The user explicitly requested a blueprint and paper-blueprint.md exists, so the workflow can return the downloadable artifact before optional review steps.",
     };
   }
 
@@ -851,6 +871,13 @@ function dynamicOrchestratorDecide(record: RunRecord): OrchestratorDecision {
       reason: state.needsWritingRefresh
         ? "Dynamic Orchestrator: Reviewer or the quality gate found writing/structure issues, so Writer revises the blueprint."
         : "Dynamic Orchestrator: required research artifacts are ready, so Writer drafts paper-blueprint.md.",
+    };
+  }
+
+  if (isExplicitBlueprintRequest(record)) {
+    return {
+      type: "final",
+      reason: "Dynamic Orchestrator: explicit blueprint request is satisfied because paper-blueprint.md exists; returning it before optional review/revision steps.",
     };
   }
 
@@ -2144,14 +2171,18 @@ function buildResult(record: RunRecord): RunResult {
 
   const reviewerStep = record.completedSteps.find((step) => step.id === "review");
   const routingStep = record.completedSteps.find((step) => step.id === "revision-routing");
+  const hasReviewArtifacts = Boolean(record.artifacts["review-notes.json"] && record.artifacts["revision-log.json"]);
+  const workflowSummary = hasReviewArtifacts
+    ? "已完成范围收敛、文献检索、证据整理、缺口分析、框架生成、质量审查与返工判断。"
+    : "已完成范围收敛、文献检索、证据整理、缺口分析与框架生成；为优先返回可下载蓝图，后置评审不再阻塞本轮结果。";
 
   return {
     title: `ResearchFlow 已完成论文框架工作流，用时约 ${elapsedSeconds} 秒。`,
     logs: [
-      "已完成范围收敛、文献检索、证据整理、缺口分析、框架生成、质量审查与返工判断。",
+      workflowSummary,
       ...record.toolTraces.map((trace) => `${trace.tool}: ${trace.summary}`),
-      reviewerStep?.summary ?? "已完成风险检查。",
-      routingStep?.summary ?? "已完成返工路由与质量门判断。",
+      ...(reviewerStep ? [reviewerStep.summary] : []),
+      ...(routingStep ? [routingStep.summary] : []),
       "最终产物已准备好：paper-blueprint.md。",
     ],
     artifact: {
