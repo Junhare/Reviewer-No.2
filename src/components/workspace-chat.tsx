@@ -46,7 +46,7 @@ type ConversationSummary = {
   id: string;
   projectId?: string;
   title: string;
-  messages: Array<{ id: string; role: "user" | "agent"; agent?: string; body: string; logs?: string[]; createdAt: string }>;
+  messages: Message[];
   updatedAt: string;
 };
 type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
@@ -77,7 +77,9 @@ export function WorkspaceChat() {
   const tabSessionRef = useRef(createEphemeralSessionId());
   const messageCounter = useRef(0);
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
-  const persistTimerRef = useRef<number | null>(null);
+  const conversationsRef = useRef<ConversationSummary[]>([]);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const persistTimersRef = useRef<Map<string, number>>(new Map());
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId) ?? null;
@@ -89,7 +91,19 @@ export function WorkspaceChat() {
   }, [activeConversationId, currentProjectId]);
   const currentAgent = isRunning ? progressLog : pendingRunId ? "Waiting for clarification" : "Ready";
   const visibleProjects = filterByQuery(projects, sidebarQuery, (project) => `${project.title} ${project.topic}`);
-  const visibleConversations = filterByQuery(conversations, sidebarQuery, (conversation) => conversation.title);
+  const visibleConversations = filterByQuery(
+    conversations.filter((conversation) => !conversation.projectId),
+    sidebarQuery,
+    (conversation) => conversation.title,
+  );
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -100,6 +114,7 @@ export function WorkspaceChat() {
       if (projectResponse.ok) setProjects(((await projectResponse.json()) as { projects: ProjectSummary[] }).projects);
       if (conversationResponse.ok) {
         const data = (await conversationResponse.json()) as { conversations: ConversationSummary[] };
+        conversationsRef.current = data.conversations;
         setConversations(data.conversations);
         if (data.conversations[0]) {
           setActiveConversationId(data.conversations[0].id);
@@ -118,20 +133,6 @@ export function WorkspaceChat() {
     const stream = messageStreamRef.current;
     if (stream) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
   }, [messages, isRunning, progressLog]);
-
-  useEffect(() => {
-    if (!activeConversationId || !messages.length) return;
-    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = window.setTimeout(() => {
-      persistConversation(activeConversationId, activeConversation?.title, messages).then((updated) => {
-        if (!updated) return;
-        setConversations((current) => current.map((conversation) => (conversation.id === updated.id ? updated : conversation)));
-      });
-    }, 350);
-    return () => {
-      if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
-    };
-  }, [activeConversation?.title, activeConversationId, messages]);
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -177,7 +178,7 @@ export function WorkspaceChat() {
     });
     if (!response.ok) return;
     const data = (await response.json()) as { conversation: ConversationSummary };
-    setConversations((current) => [data.conversation, ...current]);
+    replaceConversations([data.conversation, ...conversationsRef.current]);
     setActiveConversationId(data.conversation.id);
     setActiveProjectId(projectId ?? null);
     setMessages([]);
@@ -190,9 +191,63 @@ export function WorkspaceChat() {
   }
 
   function selectConversation(conversation: ConversationSummary) {
-    setActiveConversationId(conversation.id);
-    setActiveProjectId(conversation.projectId ?? null);
-    setMessages(conversation.messages);
+    const latest = conversationsRef.current.find((item) => item.id === conversation.id) ?? conversation;
+    setActiveConversationId(latest.id);
+    setActiveProjectId(latest.projectId ?? null);
+    setMessages(latest.messages);
+  }
+
+  async function ensureConversationForSubmit() {
+    if (activeConversationIdRef.current) return activeConversationIdRef.current;
+    const response = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: activeProjectId ?? undefined, title: activeProjectId ? "New project chat" : "New chat", messages: [] }),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { conversation: ConversationSummary };
+    replaceConversations([data.conversation, ...conversationsRef.current]);
+    setActiveConversationId(data.conversation.id);
+    setActiveProjectId(data.conversation.projectId ?? null);
+    setMessages([]);
+    return data.conversation.id;
+  }
+
+  function replaceConversations(next: ConversationSummary[]) {
+    conversationsRef.current = next;
+    setConversations(next);
+  }
+
+  function updateConversationMessages(conversationId: string, updater: (messages: Message[]) => Message[]) {
+    const target = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+    if (!target) return;
+    const updatedMessages = updater(target.messages);
+    const updatedConversation = { ...target, messages: updatedMessages, updatedAt: new Date().toISOString() };
+    replaceConversations(
+      conversationsRef.current
+        .map((conversation) => (conversation.id === conversationId ? updatedConversation : conversation))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+    );
+    if (activeConversationIdRef.current === conversationId) setMessages(updatedMessages);
+    schedulePersistConversation(updatedConversation);
+  }
+
+  function schedulePersistConversation(conversation: ConversationSummary) {
+    const existingTimer = persistTimersRef.current.get(conversation.id);
+    if (existingTimer) window.clearTimeout(existingTimer);
+    const timer = window.setTimeout(() => {
+      persistTimersRef.current.delete(conversation.id);
+      persistConversation(conversation.id, conversation.title, conversation.messages).then((updated) => {
+        if (!updated) return;
+        replaceConversations(
+          conversationsRef.current
+            .map((current) => (current.id === updated.id ? { ...current, ...updated } : current))
+            .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+        );
+        if (activeConversationIdRef.current === updated.id) setMessages(updated.messages);
+      });
+    }, 350);
+    persistTimersRef.current.set(conversation.id, timer);
   }
 
   async function submitMessage(rawInput: string) {
@@ -202,14 +257,17 @@ export function WorkspaceChat() {
     messageCounter.current += 1;
     const userMessageId = `user-request-${messageCounter.current}`;
     const responseMessageId = `run-response-${messageCounter.current}`;
-    const history = messages.map((message) => ({
+    const conversationId = await ensureConversationForSubmit();
+    if (!conversationId) return;
+    const baseMessages = conversationsRef.current.find((conversation) => conversation.id === conversationId)?.messages ?? messages;
+    const history = baseMessages.map((message) => ({
       role: message.role === "user" ? ("user" as const) : ("assistant" as const),
       body: [message.body, ...(message.logs ?? [])].join("\n"),
     }));
     const routerDecision = await routeConversationWithLLM(trimmed, Boolean(pendingRunId), history);
     const isResume = Boolean(pendingRunId) && routerDecision.route === "resume_pending";
 
-    setMessages((current) => [
+    updateConversationMessages(conversationId, (current) => [
       ...current,
       { id: userMessageId, role: "user", body: trimmed },
       { id: responseMessageId, role: "agent", agent: "ResearchFlow", body: "", logs: [`Router: ${routerDecision.reason}`], pending: true },
@@ -220,7 +278,7 @@ export function WorkspaceChat() {
     if (routerDecision.route === "conversation" || routerDecision.route === "task_control") {
       if (routerDecision.route === "task_control") setPendingRunId(null);
       setProgressLog("Conversation Router");
-      await typeLocalReply(responseMessageId, routerDecision.reply || "I will treat this as a normal conversation turn.");
+      await typeLocalReply(conversationId, responseMessageId, routerDecision.reply || "I will treat this as a normal conversation turn.");
       setIsRunning(false);
       setProgressLog("Ready");
       return;
@@ -231,13 +289,13 @@ export function WorkspaceChat() {
       const run = isResume
         ? await resumeExistingRun(pendingRunId as string, trimmed)
         : await createNewRun(history, currentSessionId, trimmed, currentProjectId);
-      applyRunSnapshot(run, responseMessageId);
-      if (run.status === "running") pollRun(run.id, responseMessageId);
+      applyRunSnapshot(conversationId, run, responseMessageId);
+      if (run.status === "running") pollRun(conversationId, run.id, responseMessageId);
       else settleRunState(run);
     } catch {
       setIsRunning(false);
       setProgressLog("Run failed");
-      setMessages((current) =>
+      updateConversationMessages(conversationId, (current) =>
         current.map((message) =>
           message.id === responseMessageId
             ? { ...message, body: "Run failed. Check API routes and server environment variables.", pending: false }
@@ -247,9 +305,9 @@ export function WorkspaceChat() {
     }
   }
 
-  function applyRunSnapshot(run: RunSnapshot, responseMessageId: string) {
+  function applyRunSnapshot(conversationId: string, run: RunSnapshot, responseMessageId: string) {
     setProgressLog(run.currentStatus);
-    setMessages((current) =>
+    updateConversationMessages(conversationId, (current) =>
       current.map((message) =>
         message.id === responseMessageId
           ? {
@@ -267,13 +325,13 @@ export function WorkspaceChat() {
     );
   }
 
-  function pollRun(runId: string, responseMessageId: string) {
+  function pollRun(conversationId: string, runId: string, responseMessageId: string) {
     const interval = window.setInterval(async () => {
       try {
         const response = await fetch(`/api/runs/${runId}`);
         if (!response.ok) throw new Error("Failed to read run");
         const run = (await response.json()) as RunSnapshot;
-        applyRunSnapshot(run, responseMessageId);
+        applyRunSnapshot(conversationId, run, responseMessageId);
         if (run.status !== "running") {
           window.clearInterval(interval);
           settleRunState(run);
@@ -297,10 +355,10 @@ export function WorkspaceChat() {
     setProgressLog(run.status === "completed" ? "Paper Blueprint ready" : "Run failed");
   }
 
-  async function typeLocalReply(messageId: string, text: string) {
+  async function typeLocalReply(conversationId: string, messageId: string, text: string) {
     for (const index of Array.from({ length: text.length }, (_, offset) => offset + 1)) {
       await new Promise((resolve) => window.setTimeout(resolve, 8));
-      setMessages((current) =>
+      updateConversationMessages(conversationId, (current) =>
         current.map((message) =>
           message.id === messageId ? { ...message, body: text.slice(0, index), pending: index < text.length } : message,
         ),
