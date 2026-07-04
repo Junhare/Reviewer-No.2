@@ -53,9 +53,6 @@ type AccountUser = { id: string; email: string; name: string };
 type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
 type SidebarMenuTarget = { type: "project" | "chat"; id: string } | null;
 
-const demoPrompt =
-  "Please help me turn this vague research idea into a complete paper blueprint: I want to study how transit-oriented development around urban rail stations affects land use and resident travel behavior, but I am not sure how to narrow the scope.";
-
 export function WorkspaceChat() {
   const [account, setAccount] = useState<AccountUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -703,9 +700,6 @@ export function WorkspaceChat() {
             <article className="empty-state">
               <h2>Start with a vague research idea</h2>
               <p>ResearchFlow turns early research uncertainty into a traceable paper blueprint workflow.</p>
-              <button className="button primary" onClick={() => setInput(demoPrompt)} type="button">
-                Use sample prompt
-              </button>
             </article>
           ) : null}
           {messages.map((message) => (
