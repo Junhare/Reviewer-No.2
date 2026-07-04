@@ -519,8 +519,47 @@ async function waitForRunToSettle(record: RunRecord) {
   }
 
   if (record.status === "running") {
+    if (completeBlueprintBeforeResponseDeadline(record)) return;
     record.currentStatus = "Run is still running; return this snapshot and poll the run endpoint.";
     record.events.push(createRunEvent("Orchestrator", "decision", record.currentStatus));
+  }
+}
+
+function completeBlueprintBeforeResponseDeadline(record: RunRecord) {
+  if (record.intent !== "full_workflow") return false;
+  if (!isExplicitBlueprintRequest(record)) return false;
+
+  const searchData = record.liveToolContexts["paper-search"] ?? "";
+  const hasSearchContext = Boolean(searchData || record.artifacts["paper-pool.json"]);
+  if (!hasSearchContext) return false;
+
+  const reason =
+    "Serverless response deadline reached after literature search; generated a downloadable blueprint from available search and workflow context instead of returning a non-durable running state.";
+  record.events.push(createRunEvent("Orchestrator", "decision", reason));
+
+  if (!record.artifacts["evidence-pack.json"]) {
+    forceArtifact(record, "evidence", "已基于当前检索结果生成截止前证据包。", buildDeterministicEvidencePack(record, searchData, reason));
+  }
+
+  if (!record.artifacts["gap-analysis.json"]) {
+    forceArtifact(record, "gap-analysis", "已基于课程论文目标生成截止前研究缺口分析。", buildDeterministicGapAnalysis(record, reason));
+  }
+
+  if (!record.artifacts["paper-blueprint.md"]) {
+    forceArtifact(record, "blueprint-draft", "已在服务端响应截止前生成可下载研究蓝图。", buildDeterministicBlueprint(record, searchData, reason));
+  }
+
+  record.reasoningSummaries.push(reason);
+  finishRun(record, reason);
+  return true;
+}
+
+function forceArtifact(record: RunRecord, stepId: WorkflowStepId, summary: string, artifact: string) {
+  const step = buildWorkflowStep(stepId);
+  record.artifacts[step.output] = artifact;
+  persistRunArtifact(record.id, step.output, artifact);
+  if (!record.completedSteps.some((completedStep) => completedStep.id === step.id)) {
+    record.completedSteps.push({ ...step, summary });
   }
 }
 
