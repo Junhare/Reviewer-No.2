@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, Search, Send, User } from "lucide-react";
+import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, MoreHorizontal, Pencil, Search, Send, Trash2, User } from "lucide-react";
 
 type Message = {
   id: string;
@@ -50,6 +50,7 @@ type ConversationSummary = {
   updatedAt: string;
 };
 type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
+type SidebarMenuTarget = { type: "project" | "chat"; id: string } | null;
 
 const authFlag = "researchflow-demo-authenticated";
 const demoPrompt =
@@ -73,6 +74,7 @@ export function WorkspaceChat() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
+  const [sidebarMenu, setSidebarMenu] = useState<SidebarMenuTarget>(null);
 
   const tabSessionRef = useRef(createEphemeralSessionId());
   const messageCounter = useRef(0);
@@ -104,6 +106,15 @@ export function WorkspaceChat() {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  useEffect(() => {
+    function closeSidebarMenu() {
+      setSidebarMenu(null);
+    }
+
+    window.addEventListener("click", closeSidebarMenu);
+    return () => window.removeEventListener("click", closeSidebarMenu);
+  }, []);
 
   useEffect(() => {
     if (!authReady) return;
@@ -185,16 +196,79 @@ export function WorkspaceChat() {
   }
 
   function selectProject(project: ProjectSummary) {
+    setSidebarMenu(null);
     setActiveProjectId(project.id);
     setActiveConversationId(null);
     setMessages([]);
   }
 
   function selectConversation(conversation: ConversationSummary) {
+    setSidebarMenu(null);
     const latest = conversationsRef.current.find((item) => item.id === conversation.id) ?? conversation;
     setActiveConversationId(latest.id);
     setActiveProjectId(latest.projectId ?? null);
     setMessages(latest.messages);
+  }
+
+  async function renameProject(project: ProjectSummary) {
+    setSidebarMenu(null);
+    const title = window.prompt("Rename project", project.title)?.trim();
+    if (!title || title === project.title) return;
+    const response = await fetch(`/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!response.ok) return;
+    const data = (await response.json()) as { project: ProjectSummary };
+    setProjects((current) => current.map((item) => (item.id === data.project.id ? data.project : item)));
+  }
+
+  async function deleteProjectFromSidebar(project: ProjectSummary) {
+    setSidebarMenu(null);
+    if (!window.confirm(`Delete project "${project.title}"? This also removes its project chats and runs.`)) return;
+    const response = await fetch(`/api/projects/${project.id}`, { method: "DELETE" });
+    if (!response.ok) return;
+    setProjects((current) => current.filter((item) => item.id !== project.id));
+    replaceConversations(conversationsRef.current.filter((conversation) => conversation.projectId !== project.id));
+    if (activeProjectId === project.id || activeConversation?.projectId === project.id) {
+      setActiveProjectId(null);
+      setActiveConversationId(null);
+      setMessages([]);
+    }
+  }
+
+  async function renameConversation(conversation: ConversationSummary) {
+    setSidebarMenu(null);
+    const title = window.prompt("Rename chat", conversation.title)?.trim();
+    if (!title || title === conversation.title) return;
+    const response = await fetch(`/api/conversations/${conversation.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!response.ok) return;
+    const data = (await response.json()) as { conversation: ConversationSummary };
+    replaceConversations(conversationsRef.current.map((item) => (item.id === data.conversation.id ? { ...item, ...data.conversation } : item)));
+    if (activeConversationId === data.conversation.id) setMessages(data.conversation.messages);
+  }
+
+  async function deleteConversationFromSidebar(conversation: ConversationSummary) {
+    setSidebarMenu(null);
+    if (!window.confirm(`Delete chat "${conversation.title}"?`)) return;
+    const response = await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    if (!response.ok) return;
+    const timer = persistTimersRef.current.get(conversation.id);
+    if (timer) window.clearTimeout(timer);
+    persistTimersRef.current.delete(conversation.id);
+    const remaining = conversationsRef.current.filter((item) => item.id !== conversation.id);
+    replaceConversations(remaining);
+    if (activeConversationId === conversation.id) {
+      const fallback = remaining.find((item) => !item.projectId) ?? remaining[0] ?? null;
+      setActiveConversationId(fallback?.id ?? null);
+      setActiveProjectId(fallback?.projectId ?? null);
+      setMessages(fallback?.messages ?? []);
+    }
   }
 
   async function ensureConversationForSubmit() {
@@ -437,13 +511,35 @@ export function WorkspaceChat() {
           <div className="sidebar-heading">Projects</div>
           <div className="project-list">
             {visibleProjects.map((project) => (
-              <div className={project.id === activeProjectId ? "sidebar-row active" : "sidebar-row"} key={project.id}>
+              <div className={project.id === activeProjectId ? "sidebar-row has-actions active" : "sidebar-row has-actions"} key={project.id}>
                 <button className="sidebar-row-main" onClick={() => selectProject(project)} type="button">
                   <span>{project.title}</span>
                 </button>
                 <a className="icon-button" href={`/projects/${project.id}`} title="Project page">
                   <FileText size={15} />
                 </a>
+                <button
+                  aria-expanded={sidebarMenu?.type === "project" && sidebarMenu.id === project.id}
+                  aria-label={`Open actions for ${project.title}`}
+                  className="icon-button sidebar-more-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSidebarMenu((current) => (current?.type === "project" && current.id === project.id ? null : { type: "project", id: project.id }));
+                  }}
+                  type="button"
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                {sidebarMenu?.type === "project" && sidebarMenu.id === project.id ? (
+                  <div className="sidebar-menu" onClick={(event) => event.stopPropagation()}>
+                    <button onClick={() => void renameProject(project)} type="button">
+                      <Pencil size={15} /> Rename
+                    </button>
+                    <button className="danger" onClick={() => void deleteProjectFromSidebar(project)} type="button">
+                      <Trash2 size={15} /> Delete
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ))}
             {!visibleProjects.length ? <p className="sidebar-empty">No projects yet.</p> : null}
@@ -457,6 +553,28 @@ export function WorkspaceChat() {
                 <button className="sidebar-row-main" onClick={() => selectConversation(conversation)} type="button">
                   <span>{conversation.title}</span>
                 </button>
+                <button
+                  aria-expanded={sidebarMenu?.type === "chat" && sidebarMenu.id === conversation.id}
+                  aria-label={`Open actions for ${conversation.title}`}
+                  className="icon-button sidebar-more-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSidebarMenu((current) => (current?.type === "chat" && current.id === conversation.id ? null : { type: "chat", id: conversation.id }));
+                  }}
+                  type="button"
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                {sidebarMenu?.type === "chat" && sidebarMenu.id === conversation.id ? (
+                  <div className="sidebar-menu" onClick={(event) => event.stopPropagation()}>
+                    <button onClick={() => void renameConversation(conversation)} type="button">
+                      <Pencil size={15} /> Rename
+                    </button>
+                    <button className="danger" onClick={() => void deleteConversationFromSidebar(conversation)} type="button">
+                      <Trash2 size={15} /> Delete
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ))}
             {!visibleConversations.length ? <p className="sidebar-empty">No chats yet.</p> : null}

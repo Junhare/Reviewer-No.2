@@ -734,6 +734,10 @@ textarea {
   color: var(--muted);
 }
 
+.sidebar-row.has-actions {
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
+}
+
 .sidebar-row.project {
   grid-template-columns: 26px minmax(0, 1fr) 26px;
 }
@@ -780,6 +784,16 @@ textarea {
 
 .icon-button:hover {
   background: rgba(29, 37, 34, 0.08);
+}
+
+.sidebar-more-button {
+  opacity: 0.62;
+}
+
+.sidebar-row:hover .sidebar-more-button,
+.sidebar-row.active .sidebar-more-button,
+.sidebar-more-button[aria-expanded="true"] {
+  opacity: 1;
 }
 
 .nested-list {
