@@ -15,6 +15,13 @@ export async function getCurrentUser() {
   return getOrCreateDefaultUser();
 }
 
+export async function getAuthenticatedUser() {
+  const cookieStore = await cookies();
+  const userId = cookieStore.get(sessionCookieName)?.value;
+  if (!userId) return null;
+  return findUserById(userId);
+}
+
 export async function registerUser(input: { email: string; password: string; name?: string }) {
   const passwordHash = hashPassword(input.password);
   const user = createUser({
@@ -44,6 +51,11 @@ export async function loginUser(input: { email: string; password: string }) {
     path: "/",
   });
   return user;
+}
+
+export async function logoutUser() {
+  const cookieStore = await cookies();
+  cookieStore.delete(sessionCookieName);
 }
 
 function hashPassword(password: string) {

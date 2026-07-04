@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, MoreHorizontal, Pencil, Search, Send, Trash2, User } from "lucide-react";
+import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, LogOut, MoreHorizontal, Pencil, Search, Send, Trash2, User } from "lucide-react";
 
 type Message = {
   id: string;
@@ -49,15 +49,16 @@ type ConversationSummary = {
   messages: Message[];
   updatedAt: string;
 };
+type AccountUser = { id: string; email: string; name: string };
 type RouterDecision = { intent: string; route: "conversation" | "researchflow" | "resume_pending" | "task_control"; confidence: number; reply: string; reason: string };
 type SidebarMenuTarget = { type: "project" | "chat"; id: string } | null;
 
-const authFlag = "researchflow-demo-authenticated";
 const demoPrompt =
   "Please help me turn this vague research idea into a complete paper blueprint: I want to study how transit-oriented development around urban rail stations affects land use and resident travel behavior, but I am not sure how to narrow the scope.";
 
 export function WorkspaceChat() {
-  const [authReady, setAuthReady] = useState(() => typeof window !== "undefined" && window.localStorage.getItem(authFlag) === "true");
+  const [account, setAccount] = useState<AccountUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authError, setAuthError] = useState("");
   const [authEmail, setAuthEmail] = useState("");
@@ -108,6 +109,23 @@ export function WorkspaceChat() {
   }, [activeConversationId]);
 
   useEffect(() => {
+    let cancelled = false;
+    async function loadSession() {
+      const response = await fetch("/api/auth/me");
+      if (cancelled) return;
+      if (response.ok) {
+        const data = (await response.json()) as { user: AccountUser | null };
+        setAccount(data.user);
+      }
+      setAuthChecked(true);
+    }
+    void loadSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     function closeSidebarMenu() {
       setSidebarMenu(null);
     }
@@ -117,9 +135,13 @@ export function WorkspaceChat() {
   }, []);
 
   useEffect(() => {
-    if (!authReady) return;
+    if (!authChecked) return;
     let cancelled = false;
     async function loadData() {
+      if (!account) {
+        resetWorkspaceState();
+        return;
+      }
       const [projectResponse, conversationResponse] = await Promise.all([fetch("/api/projects"), fetch("/api/conversations")]);
       if (cancelled) return;
       if (projectResponse.ok) setProjects(((await projectResponse.json()) as { projects: ProjectSummary[] }).projects);
@@ -131,6 +153,10 @@ export function WorkspaceChat() {
           setActiveConversationId(data.conversations[0].id);
           setActiveProjectId(data.conversations[0].projectId ?? null);
           setMessages(data.conversations[0].messages);
+        } else {
+          setActiveConversationId(null);
+          setActiveProjectId(null);
+          setMessages([]);
         }
       }
     }
@@ -138,7 +164,7 @@ export function WorkspaceChat() {
     return () => {
       cancelled = true;
     };
-  }, [authReady]);
+  }, [account, authChecked]);
 
   useEffect(() => {
     const stream = messageStreamRef.current;
@@ -158,8 +184,35 @@ export function WorkspaceChat() {
       setAuthError(data?.error ?? "Authentication failed.");
       return;
     }
-    window.localStorage.setItem(authFlag, "true");
-    setAuthReady(true);
+    const data = (await response.json()) as { user: AccountUser };
+    setAuthPassword("");
+    setAccount(data.user);
+  }
+
+  async function handleLogout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAccount(null);
+    resetWorkspaceState();
+    setAuthError("");
+    setAuthPassword("");
+  }
+
+  function resetWorkspaceState() {
+    for (const timer of persistTimersRef.current.values()) window.clearTimeout(timer);
+    persistTimersRef.current.clear();
+    conversationsRef.current = [];
+    activeConversationIdRef.current = null;
+    setProjects([]);
+    setConversations([]);
+    setActiveProjectId(null);
+    setActiveConversationId(null);
+    setMessages([]);
+    setPendingRunId(null);
+    setSidebarMenu(null);
+    setSidebarQuery("");
+    setInput("");
+    setIsRunning(false);
+    setProgressLog("Ready");
   }
 
   async function handleNewProject() {
@@ -469,7 +522,24 @@ export function WorkspaceChat() {
     void submitMessage(input);
   }
 
-  if (!authReady) {
+  if (!authChecked) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel">
+          <div className="brand auth-brand">
+            <span className="brand-mark">RF</span>
+            <div>
+              <strong>ResearchFlow Agent</strong>
+              <span>Loading account</span>
+            </div>
+          </div>
+          <p className="subtle">Checking your session...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!account) {
     return (
       <main className="auth-shell">
         <section className="auth-panel">
@@ -604,7 +674,14 @@ export function WorkspaceChat() {
           </div>
         </section>
         <div className="sidebar-footer">
-          <User size={16} /> Account active
+          <User size={16} />
+          <div className="account-meta">
+            <strong>{account.name}</strong>
+            <span>{account.email}</span>
+          </div>
+          <button aria-label="Sign out" className="icon-button" onClick={() => void handleLogout()} title="Sign out" type="button">
+            <LogOut size={15} />
+          </button>
         </div>
       </aside>
 

@@ -850,10 +850,35 @@ textarea {
   align-items: center;
   gap: 8px;
   margin-top: auto;
+  min-width: 0;
   border-top: 1px solid var(--line);
   padding-top: 14px;
   color: var(--muted);
   font-size: 14px;
+}
+
+.account-meta {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.account-meta strong,
+.account-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-meta strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.account-meta span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .chat-main {
