@@ -54,6 +54,8 @@ sample-project/memory/
 
 # vercel
 .vercel
+.deploy-*/
+clean-deploy-*/
 
 # typescript
 *.tsbuildinfo

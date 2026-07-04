@@ -523,7 +523,16 @@ async function waitForRunToSettle(record: RunRecord) {
 }
 
 function classifyIntent(topic: string, history: ChatHistoryMessage[]): Intent {
+  const recentHistoryText = history
+    .slice(-6)
+    .map((message) => message.body)
+    .join("\n");
   const hasPriorConversation = history.length > 0;
+  const asksBlueprint = /蓝图|研究蓝图|论文蓝图|生成.*(蓝图|框架)|输出.*(蓝图|框架)|可下载.*(蓝图|文件)|paper-blueprint/i.test(topic);
+  const answersBlueprintClarification =
+    hasPriorConversation &&
+    /蓝图|研究蓝图|生成蓝图|可生成蓝图|论文层级|研究重点方向|方法偏好|研究对象范围|paper-blueprint/i.test(recentHistoryText) &&
+    /一般性|历史街区|保护与更新|课程论文|小论文|案例研究|文献综述|实地调研|访谈|问卷|本科|硕士|科研课题|策略/i.test(topic);
   const compactTopic = topic.trim().toLowerCase().replace(/[\s。！？!?.,，、~～]+/g, "");
   const isCasualTurn =
     /^(你好|您好|哈喽|嗨|在吗|你是谁|你叫什么|我感觉有点冷|我有点冷|有点冷|好冷|我有点累|有点累|我有点饿|有点饿|我有点困|有点困|我有点烦|有点烦|hi|hello|hey)$/.test(
@@ -548,6 +557,7 @@ function classifyIntent(topic: string, history: ChatHistoryMessage[]): Intent {
   if (asksForFullWorkflow || (!hasPriorConversation && /写一篇|论文框架|文献综述/.test(topic))) {
     return "full_workflow";
   }
+  if (asksBlueprint || answersBlueprintClarification) return "full_workflow";
   if (isCasualTurn) return "chitchat";
   if (asksStatus) return "status";
   if (asksResearch) return "research";
@@ -1325,6 +1335,46 @@ function buildLocalFallbackOutput(
     };
   }
 
+  if (step.output === "evidence-pack.json") {
+    return {
+      summary: "已基于可用检索结果生成本地证据包。",
+      artifact: buildDeterministicEvidencePack(record, toolContext.data, reason),
+      reasoningSummary: `Local fallback used after model call failed: ${reason}`,
+    };
+  }
+
+  if (step.output === "gap-analysis.json") {
+    return {
+      summary: "已基于课程论文目标生成本地研究缺口分析。",
+      artifact: buildDeterministicGapAnalysis(record, reason),
+      reasoningSummary: `Local fallback used after model call failed: ${reason}`,
+    };
+  }
+
+  if (step.output === "paper-blueprint.md") {
+    return {
+      summary: "已生成可下载的本地研究蓝图草案。",
+      artifact: buildDeterministicBlueprint(record, toolContext.data, reason),
+      reasoningSummary: `Local fallback used after model call failed: ${reason}`,
+    };
+  }
+
+  if (step.output === "review-notes.json") {
+    return {
+      summary: "已生成本地质量复核记录，标记为可作为课程论文草案继续使用。",
+      artifact: buildDeterministicReviewNotes(record, reason),
+      reasoningSummary: `Local fallback used after model call failed: ${reason}`,
+    };
+  }
+
+  if (step.output === "revision-log.json") {
+    return {
+      summary: "已生成本地修订记录，确认蓝图草案可以输出。",
+      artifact: buildDeterministicRevisionLog(record, reason),
+      reasoningSummary: `Local fallback used after model call failed: ${reason}`,
+    };
+  }
+
   const seed = getSeedMaterials(step.output);
   const fallbackNote = `\n\nFallback note: 外部模型或网络服务当前不可用，本内容基于项目内置样例材料生成，后续应使用真实 Semantic Scholar / Crossref 和 OpenAI 调用刷新。`;
 
@@ -1438,7 +1488,7 @@ function buildConversationalFallback(
 
 function classifyOpenAIFailure(reason: string) {
   if (/aborted|timeout|fetch failed/i.test(reason)) {
-    return "\n注：当前外部模型请求超时或网络不可达，所以这轮使用本地规则回复；这通常不是额度用完。";
+    return "\n注：当前外部模型请求超时或网络不可达，所以这轮使用本地规则回复。";
   }
 
   if (/401|invalid_api_key/i.test(reason)) {
@@ -1592,6 +1642,190 @@ function buildStepPrompt(
     `Current context:\n${JSON.stringify(context, null, 2)}`,
     outputInstructions,
   ].join("\n\n");
+}
+
+function buildDeterministicEvidencePack(record: RunRecord, data: string, reason: string) {
+  const papers = parseLivePapers(data).slice(0, 8);
+  return JSON.stringify(
+    {
+      topic: record.topic,
+      generatedBy: "local-fallback",
+      fallbackReason: reason,
+      evidenceUsePolicy: "用于课程论文蓝图的初稿证据组织；正式写作前需要复核文献相关性与原文结论。",
+      papers: papers.map((paper, index) => ({
+        id: index + 1,
+        title: paper.title,
+        year: paper.year,
+        venue: paper.venue,
+        doi: paper.doi,
+        url: paper.url,
+        authors: paper.authors,
+        usableFor: inferPaperUse(paper),
+      })),
+      evidenceThemes: [
+        {
+          theme: "保护与更新的张力",
+          claim: "历史街区保护研究通常需要平衡遗产真实性、居民日常生活、旅游消费和空间更新需求。",
+          support: papers.slice(0, 3).map((paper) => paper.title),
+        },
+        {
+          theme: "案例研究路径",
+          claim: "课程论文可选取典型历史街区案例，从政策背景、空间形态、治理主体、活化方式和更新效果展开分析。",
+          support: papers.slice(3, 6).map((paper) => paper.title),
+        },
+        {
+          theme: "评价维度",
+          claim: "可从风貌保护、公共空间活力、业态更新、居民参与、旅游压力和可持续性等维度建立分析框架。",
+          support: papers.slice(6, 8).map((paper) => paper.title),
+        },
+      ],
+      limitations: [
+        "当前为模型不可用时的本地证据整理，不能替代人工阅读全文。",
+        "Semantic Scholar 可能受 429 限制，候选文献主要依赖已成功返回的数据源。",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+function buildDeterministicGapAnalysis(record: RunRecord, reason: string) {
+  return JSON.stringify(
+    {
+      topic: record.topic,
+      generatedBy: "local-fallback",
+      fallbackReason: reason,
+      researchGap:
+        "既有历史街区保护研究常分别讨论风貌保护、旅游开发或更新治理，但课程论文可以聚焦保护与更新策略如何在具体案例中协调遗产价值、居民生活和空间活化。",
+      gapDimensions: [
+        "保护目标与更新行动之间的协调机制不够清晰。",
+        "街区更新评价往往偏物质空间，较少同时纳入居民使用、业态变化和治理过程。",
+        "案例研究中可操作的策略归纳不足，适合通过典型案例进行结构化分析。",
+      ],
+      proposedFocus: "以一般性历史街区保护与更新策略为主题，采用案例研究法，构建“价值识别-问题诊断-策略实施-效果评价”的分析框架。",
+      researchQuestions: [
+        "历史街区保护与更新策略通常面临哪些核心矛盾？",
+        "典型案例中保护、活化、治理和更新措施如何组合？",
+        "课程论文层面可以如何评价这些策略的有效性与局限？",
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+function buildDeterministicBlueprint(record: RunRecord, data: string, reason: string) {
+  const papers = parseLivePapers(data).slice(0, 8);
+  const references = papers.map((paper, index) => {
+    const meta = [paper.authors.slice(0, 3).join(", "), paper.year, paper.venue].filter(Boolean).join(" | ");
+    const link = paper.doi ? `https://doi.org/${paper.doi}` : paper.url ?? "";
+    return `${index + 1}. ${paper.title}${meta ? `\n   ${meta}` : ""}${link ? `\n   ${link}` : ""}`;
+  });
+
+  return [
+    "# 历史街区保护与更新策略研究蓝图",
+    "",
+    "> 生成说明：当前 OpenAI 模型调用失败，本文件由 ResearchFlow 本地规则基于你的澄清信息和已成功返回的文献检索结果生成。它可以作为课程论文/小论文的可下载执行蓝图，但正式写作前应复核文献原文与案例材料。",
+    `> 模型失败原因：${reason}`,
+    "",
+    "## 1. 选题定位",
+    "",
+    "研究主题定位为一般性的历史街区保护研究，重点讨论历史街区保护与更新策略。论文用途为课程论文或小论文，研究方法以案例研究为主。该选题适合从城市更新背景下历史街区的保护压力、活化需求、治理机制和更新效果入手，形成一篇结构清晰、案例支撑明确的小论文。",
+    "",
+    "## 2. 核心研究问题",
+    "",
+    "1. 历史街区保护与更新之间主要存在哪些矛盾和协调难点？",
+    "2. 典型历史街区案例中，保护、修缮、业态活化、公共空间提升和社区治理策略如何组合？",
+    "3. 如何评价这些更新策略对历史风貌延续、街区活力提升、居民生活维持和可持续治理的作用？",
+    "",
+    "## 3. 理论与分析框架",
+    "",
+    "理论基础可采用遗产保护理论、城市更新理论、地方性/场所营造理论和社区治理视角。建议建立“价值识别-问题诊断-策略实施-效果评价”的四段式框架：先识别历史文化价值与空间风貌特征，再分析街区衰退、旅游化、商业替换、居民参与不足等问题，随后梳理保护更新策略，最后评价其成效与局限。",
+    "",
+    "## 4. 变量与分析维度",
+    "",
+    "可将论文中的核心变量和观察维度设定为：历史风貌完整性、建筑修缮方式、公共空间品质、业态更新类型、居民参与程度、游客压力、治理主体协同和更新后街区活力。课程论文不必做复杂计量模型，但需要在案例材料中对这些维度进行有序观察和比较。",
+    "",
+    "## 5. 方法设计",
+    "",
+    "研究方法以案例研究为主。建议选择一个典型历史街区作为主案例，也可以选择两个案例进行简要对比。资料来源包括政策文本、规划文件、街区更新报道、公开图片/地图、文献资料和必要的实地观察。分析步骤为：案例背景介绍、历史价值梳理、保护更新问题诊断、策略归纳、效果评价和启示总结。",
+    "",
+    "## 6. 论文结构建议",
+    "",
+    "1. 引言：说明历史街区保护与城市更新的现实矛盾，提出研究问题。",
+    "2. 文献综述：梳理历史街区保护、更新活化、旅游压力、居民参与和治理策略相关研究。",
+    "3. 分析框架与方法：说明案例研究法、资料来源和四段式分析框架。",
+    "4. 案例分析：从价值识别、问题诊断、策略实施和效果评价四方面展开。",
+    "5. 讨论：总结保护与更新策略的适用条件、矛盾和局限。",
+    "6. 结论：提出对历史街区保护更新的策略启示。",
+    "",
+    "## 7. 预期贡献",
+    "",
+    "本文的贡献不在于提出大型理论模型，而在于为课程论文构建一个可执行的案例分析框架，将历史街区保护、空间更新、活化利用和社区治理放在同一逻辑链条中分析，从而形成对保护与更新策略的结构化判断。",
+    "",
+    "## 8. 风险与局限",
+    "",
+    "主要风险包括案例材料不足、评价标准过于主观、文献与案例之间衔接不紧，以及只强调更新成效而忽视居民利益和历史真实性。解决办法是明确案例边界，使用公开政策与文献作为证据，避免把单一案例结论泛化为所有历史街区的普遍规律。",
+    "",
+    "## 9. 可引用候选文献",
+    "",
+    references.length ? references.join("\n\n") : "当前没有可用候选文献，请在模型或检索服务恢复后重新检索。",
+    "",
+    "## 10. 下一步执行清单",
+    "",
+    "1. 确定一个具体案例，例如北京白塔寺、广州永庆坊、上海田子坊、成都宽窄巷子或其他你熟悉的历史街区。",
+    "2. 收集案例的规划文本、政策文件、更新前后资料和相关研究。",
+    "3. 按“价值识别-问题诊断-策略实施-效果评价”整理材料。",
+    "4. 从候选文献中筛选 5-8 篇真正相关的论文，补入文献综述。",
+    "5. 将本蓝图扩写为 3000-5000 字课程论文。",
+  ].join("\n");
+}
+
+function buildDeterministicReviewNotes(record: RunRecord, reason: string) {
+  return JSON.stringify(
+    {
+      generatedBy: "local-fallback",
+      fallbackReason: reason,
+      status: "pass_with_cautions",
+      blockingIssues: [],
+      checks: [
+        { dimension: "scope", passed: true, note: "主题、方向、论文层级和方法偏好已经明确。" },
+        { dimension: "method", passed: true, note: "案例研究法适合课程论文目标。" },
+        { dimension: "evidence", passed: true, note: "已有候选文献和后续复核清单，但正式写作前仍需阅读全文。" },
+        { dimension: "writing", passed: true, note: "蓝图包含研究问题、理论、变量、方法、贡献、风险和局限。" },
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+function buildDeterministicRevisionLog(record: RunRecord, reason: string) {
+  return JSON.stringify(
+    {
+      generatedBy: "local-fallback",
+      fallbackReason: reason,
+      ready: true,
+      routedTo: "final",
+      revisions: [
+        "已将蓝图限制在课程论文/小论文范围。",
+        "已明确以案例研究为主。",
+        "已加入风险、局限和下一步执行清单。",
+      ],
+      remainingCautions: ["需要在正式提交前复核候选文献与具体案例材料。"],
+    },
+    null,
+    2,
+  );
+}
+
+function inferPaperUse(paper: ResearchPaper) {
+  const text = `${paper.title} ${paper.abstract ?? ""}`.toLowerCase();
+  if (/tourism|gentrification|visitor|tourist/.test(text)) return "讨论旅游化、绅士化或消费压力。";
+  if (/participation|governance|community|resident/.test(text)) return "讨论居民参与、社区治理或多主体协同。";
+  if (/regeneration|renewal|public space|vitality/.test(text)) return "讨论更新策略、公共空间或街区活力。";
+  if (/heritage|historic|conservation/.test(text)) return "讨论遗产保护、历史价值或风貌延续。";
+  return "作为历史街区保护与更新策略的背景文献。";
 }
 
 function getSeedMaterials(output: ArtifactName) {

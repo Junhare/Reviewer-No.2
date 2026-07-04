@@ -7,5 +7,7 @@ prod-server*.log
 .env*
 .agents
 .codex
+.deploy-*
+clean-deploy-*
 sample-project/runs
 sample-project/memory

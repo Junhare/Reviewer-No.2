@@ -157,6 +157,16 @@ function extractJson(text: string) {
 }
 
 function buildRuleFallback(input: string, hasPendingRun: boolean): RouterResult {
+  if (/蓝图|研究蓝图|论文蓝图|生成.*(蓝图|框架)|输出.*(蓝图|框架)|可下载.*(蓝图|文件)|paper-blueprint/i.test(input)) {
+    return {
+      intent: "research_request",
+      route: "researchflow",
+      confidence: 0.92,
+      reply: "",
+      reason: "Matched blueprint-generation keywords in rule fallback.",
+    };
+  }
+
   const compact = input.trim().toLowerCase().replace(/[\s。！？!?.,，、~～]+/g, "");
 
   if (/^(你是谁|你是谁呀|你是谁啊|你是什么|你能做什么|介绍一下你|whoareyou|whatcanyoudo)$/.test(compact)) {
