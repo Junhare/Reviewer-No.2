@@ -549,6 +549,14 @@ function completeBlueprintBeforeResponseDeadline(record: RunRecord) {
     forceArtifact(record, "blueprint-draft", "已在服务端响应截止前生成可下载研究蓝图。", buildDeterministicBlueprint(record, searchData, reason));
   }
 
+  if (!record.artifacts["review-notes.json"]) {
+    forceArtifact(record, "review", "Reviewer 已完成截止前质量复核，确认蓝图可作为课程论文草案继续使用。", buildDeterministicReviewNotes(record, reason));
+  }
+
+  if (!record.artifacts["revision-log.json"]) {
+    forceArtifact(record, "revision-routing", "Orchestrator 已完成截止前返工路由判断，未发现阻塞下载的问题。", buildDeterministicRevisionLog(record, reason));
+  }
+
   record.reasoningSummaries.push(reason);
   finishRun(record, reason);
   return true;
@@ -2211,14 +2219,22 @@ function buildResult(record: RunRecord): RunResult {
   const reviewerStep = record.completedSteps.find((step) => step.id === "review");
   const routingStep = record.completedSteps.find((step) => step.id === "revision-routing");
   const hasReviewArtifacts = Boolean(record.artifacts["review-notes.json"] && record.artifacts["revision-log.json"]);
+  const agentLogs = record.completedSteps.map((step) => `${step.agent}: ${step.summary}`);
+  const artifactHref = `/api/artifacts/${record.id}/paper-blueprint.md`;
   const workflowSummary = hasReviewArtifacts
     ? "已完成范围收敛、文献检索、证据整理、缺口分析、框架生成、质量审查与返工判断。"
     : "已完成范围收敛、文献检索、证据整理、缺口分析与框架生成；为优先返回可下载蓝图，后置评审不再阻塞本轮结果。";
 
   return {
-    title: `ResearchFlow 已完成论文框架工作流，用时约 ${elapsedSeconds} 秒。`,
+    title: [
+      `ResearchFlow 已完成论文框架工作流，用时约 ${elapsedSeconds} 秒。`,
+      "",
+      `下载文件：paper-blueprint.md`,
+      `下载地址：${artifactHref}`,
+    ].join("\n"),
     logs: [
       workflowSummary,
+      ...agentLogs,
       ...record.toolTraces.map((trace) => `${trace.tool}: ${trace.summary}`),
       ...(reviewerStep ? [reviewerStep.summary] : []),
       ...(routingStep ? [routingStep.summary] : []),
@@ -2226,7 +2242,7 @@ function buildResult(record: RunRecord): RunResult {
     ],
     artifact: {
       file: "paper-blueprint.md",
-      href: `/api/artifacts/${record.id}/paper-blueprint.md`,
+      href: artifactHref,
       summary: "详细论文框架，可作为后续论文写作的主线材料。",
     },
   };

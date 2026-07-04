@@ -765,7 +765,7 @@ export function WorkspaceChat() {
                   <strong>{message.role === "user" ? "You" : message.agent ?? "ResearchFlow"}</strong>
                   {message.pending ? <span>Running</span> : null}
                 </div>
-                {message.logs?.length ? <div className="message-logs">{message.logs.slice(-8).map((log, index) => <span key={`${message.id}-${index}`}>{log}</span>)}</div> : null}
+                {message.logs?.length ? <div className="message-logs">{message.logs.slice(-16).map((log, index) => <span key={`${message.id}-${index}`}>{log}</span>)}</div> : null}
                 <p className="message-text">{message.body}</p>
                 {message.toolTraces?.length ? (
                   <div className="tool-trace-list">
