@@ -33,7 +33,7 @@ export async function GET(
   return new Response(content, {
     headers: {
       "content-type": "text/markdown; charset=utf-8",
-      "content-disposition": `inline; filename="${file}"`,
+      "content-disposition": `attachment; filename="${file}"`,
     },
   });
 }

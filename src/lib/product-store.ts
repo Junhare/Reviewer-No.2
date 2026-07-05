@@ -40,6 +40,10 @@ export type StoredChatMessage = {
   agent?: string;
   body: string;
   logs?: string[];
+  reasoningSummary?: string;
+  toolTraces?: RunSnapshot["toolTraces"];
+  quickActions?: NonNullable<RunSnapshot["result"]>["quickActions"];
+  artifact?: NonNullable<RunSnapshot["result"]>["artifact"];
   createdAt: string;
 };
 

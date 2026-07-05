@@ -784,11 +784,11 @@ export function WorkspaceChat() {
                     {message.quickActions.map((action) => <button disabled={isRunning} key={action.label} onClick={() => void submitMessage(action.value)} type="button">{action.label}</button>)}
                   </div>
                 ) : null}
-                {message.artifact ? (
-                  <a className="file-card" href={message.artifact.href}>
+                {getMessageArtifact(message) ? (
+                  <a className="file-card" download={getMessageArtifact(message)?.file} href={getMessageArtifact(message)?.href}>
                     <FileText size={18} />
-                    <span><strong>{message.artifact.file}</strong><small>{message.artifact.summary}</small></span>
-                    <Download size={16} />
+                    <span><strong>{getMessageArtifact(message)?.file}</strong><small>{getMessageArtifact(message)?.summary}</small></span>
+                    <span className="file-card-action"><Download size={15} /> Download</span>
                   </a>
                 ) : null}
               </div>
@@ -834,11 +834,37 @@ async function persistConversation(conversationId: string, currentTitle: string 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       title,
-      messages: messages.map((message) => ({ id: message.id, role: message.role, agent: message.agent, body: message.body, logs: message.logs, createdAt: new Date().toISOString() })),
+      messages: messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        agent: message.agent,
+        body: message.body,
+        logs: message.logs,
+        reasoningSummary: message.reasoningSummary,
+        toolTraces: message.toolTraces,
+        quickActions: message.quickActions,
+        artifact: message.artifact ?? getMessageArtifact(message),
+        createdAt: new Date().toISOString(),
+      })),
     }),
   });
   if (!response.ok) return null;
   return ((await response.json()) as { conversation: ConversationSummary }).conversation;
+}
+
+function getMessageArtifact(message: Message) {
+  if (message.artifact) return message.artifact;
+
+  const file = message.body.match(/(?:下载文件|Download file)[:：]\s*([^\n]+)/i)?.[1]?.trim();
+  const href = message.body.match(/(?:下载地址|Download URL)[:：]\s*(\/api\/artifacts\/[^\s]+)/i)?.[1]?.trim();
+
+  if (!file || !href) return undefined;
+
+  return {
+    file,
+    href,
+    summary: "Click to download the generated paper blueprint.",
+  };
 }
 
 async function routeConversationWithLLM(input: string, hasPendingRun: boolean, recentHistory: Array<{ role: "user" | "assistant"; body: string }>): Promise<RouterDecision> {

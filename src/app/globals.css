@@ -1103,15 +1103,32 @@ textarea {
   background: rgba(39, 113, 95, 0.08);
   padding: 10px;
   color: var(--accent-strong);
+  text-decoration: none;
 }
 
 .file-card span {
   display: grid;
   gap: 2px;
+  min-width: 0;
 }
 
 .file-card small {
   color: var(--muted);
+}
+
+.file-card-action {
+  display: inline-flex !important;
+  flex: 0 0 auto;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 6px !important;
+  margin-left: auto;
+  border-radius: 6px;
+  background: var(--accent-strong);
+  padding: 7px 9px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 760;
 }
 
 .chat-composer {
