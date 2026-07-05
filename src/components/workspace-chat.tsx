@@ -472,7 +472,7 @@ export function WorkspaceChat() {
     updateConversationMessages(conversationId, (current) => [
       ...current,
       { id: userMessageId, role: "user", body: trimmed },
-      { id: responseMessageId, role: "agent", agent: "ResearchFlow", body: "", logs: [`Router: ${routerDecision.reason}`], pending: true },
+      { id: responseMessageId, role: "agent", agent: "ResearchFlow", body: "", logs: [formatRouterStatus(routerDecision, Boolean(pendingRunId))], pending: true },
     ]);
     setInput("");
     setIsRunning(true);
@@ -885,6 +885,13 @@ function getMessageArtifact(message: Message) {
     href,
     summary: "Click to download the generated paper blueprint.",
   };
+}
+
+function formatRouterStatus(decision: RouterDecision, hasPendingRun: boolean) {
+  if (decision.route === "researchflow") return "已识别为论文蓝图生成任务，正在启动 ResearchFlow 工作流。";
+  if (decision.route === "resume_pending") return hasPendingRun ? "已收到澄清回复，正在继续 ResearchFlow 工作流。" : "正在继续 ResearchFlow 工作流。";
+  if (decision.route === "task_control") return "已识别为任务控制请求，正在处理。";
+  return "已识别为普通对话，正在回复。";
 }
 
 async function routeConversationWithLLM(input: string, hasPendingRun: boolean, recentHistory: Array<{ role: "user" | "assistant"; body: string }>): Promise<RouterDecision> {
