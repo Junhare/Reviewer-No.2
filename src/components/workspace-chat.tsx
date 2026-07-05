@@ -1,7 +1,9 @@
 ﻿"use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, CheckCircle2, Download, FileText, FolderPlus, History, Loader2, LogIn, LogOut, MoreHorizontal, Pencil, Search, Send, Trash2, User } from "lucide-react";
+
+type MessageArtifact = { file: string; href: string; summary: string; content?: string };
 
 type Message = {
   id: string;
@@ -13,7 +15,7 @@ type Message = {
   toolTraces?: ToolTrace[];
   quickActions?: QuickAction[];
   pending?: boolean;
-  artifact?: { file: string; href: string; summary: string };
+  artifact?: MessageArtifact;
 };
 
 type QuickAction = { label: string; value: string };
@@ -37,7 +39,7 @@ type RunSnapshot = {
     title: string;
     logs: string[];
     quickActions?: QuickAction[];
-    artifact?: { file: string; href: string; summary: string };
+    artifact?: MessageArtifact;
   };
 };
 
@@ -572,6 +574,21 @@ export function WorkspaceChat() {
     void submitMessage(input);
   }
 
+  function handleArtifactDownload(event: MouseEvent<HTMLAnchorElement>, artifact: MessageArtifact) {
+    if (!artifact.content) return;
+
+    event.preventDefault();
+    const blob = new Blob([artifact.content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = artifact.file;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   if (!authChecked) {
     return (
       <main className="auth-shell">
@@ -784,13 +801,16 @@ export function WorkspaceChat() {
                     {message.quickActions.map((action) => <button disabled={isRunning} key={action.label} onClick={() => void submitMessage(action.value)} type="button">{action.label}</button>)}
                   </div>
                 ) : null}
-                {getMessageArtifact(message) ? (
-                  <a className="file-card" download={getMessageArtifact(message)?.file} href={getMessageArtifact(message)?.href}>
-                    <FileText size={18} />
-                    <span><strong>{getMessageArtifact(message)?.file}</strong><small>{getMessageArtifact(message)?.summary}</small></span>
-                    <span className="file-card-action"><Download size={15} /> Download</span>
-                  </a>
-                ) : null}
+                {(() => {
+                  const artifact = getMessageArtifact(message);
+                  return artifact ? (
+                    <a className="file-card" download={artifact.file} href={artifact.href} onClick={(event) => handleArtifactDownload(event, artifact)}>
+                      <FileText size={18} />
+                      <span><strong>{artifact.file}</strong><small>{artifact.summary}</small></span>
+                      <span className="file-card-action"><Download size={15} /> Download</span>
+                    </a>
+                  ) : null;
+                })()}
               </div>
               {message.role === "user" ? <div className="message-avatar user-avatar"><User size={16} /></div> : null}
             </article>

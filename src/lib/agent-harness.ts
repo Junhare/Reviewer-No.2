@@ -82,6 +82,7 @@ export type RunResult = {
     file: string;
     href: string;
     summary: string;
+    content?: string;
   };
 };
 
@@ -2221,6 +2222,7 @@ function buildResult(record: RunRecord): RunResult {
   const hasReviewArtifacts = Boolean(record.artifacts["review-notes.json"] && record.artifacts["revision-log.json"]);
   const agentLogs = record.completedSteps.map((step) => `${step.agent}: ${step.summary}`);
   const artifactHref = `/api/artifacts/${record.id}/paper-blueprint.md`;
+  const blueprintContent = record.artifacts["paper-blueprint.md"];
   const workflowSummary = hasReviewArtifacts
     ? "已完成范围收敛、文献检索、证据整理、缺口分析、框架生成、质量审查与返工判断。"
     : "已完成范围收敛、文献检索、证据整理、缺口分析与框架生成；为优先返回可下载蓝图，后置评审不再阻塞本轮结果。";
@@ -2241,6 +2243,7 @@ function buildResult(record: RunRecord): RunResult {
     artifact: {
       file: "paper-blueprint.md",
       href: artifactHref,
+      content: blueprintContent,
       summary: "详细论文框架，可作为后续论文写作的主线材料。",
     },
   };

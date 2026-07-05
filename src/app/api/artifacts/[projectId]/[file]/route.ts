@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { getStoredRun } from "@/lib/product-store";
 
 const allowedProject = "tod-station-area";
 const allowedFiles = new Set(["paper-blueprint.md"]);
@@ -24,7 +26,13 @@ export async function GET(
       ? path.join(process.cwd(), "sample-project", file)
       : path.join(process.env.VERCEL ? path.join("/tmp", "researchflow-agent") : process.cwd(), "sample-project", "runs", projectId, file);
 
-  const content = await readFile(artifactPath, "utf8").catch(() => null);
+  let content = await readFile(artifactPath, "utf8").catch(() => null);
+
+  if (!content && projectId.startsWith("run-")) {
+    const user = await getCurrentUser();
+    const storedRun = getStoredRun(user.id, projectId);
+    content = (storedRun?.snapshot.resumeState?.artifacts as Record<string, string> | undefined)?.[file] ?? null;
+  }
 
   if (!content) {
     return NextResponse.json({ error: "Artifact not found" }, { status: 404 });

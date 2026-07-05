@@ -314,6 +314,7 @@ export function upsertRunSnapshot(ownerId: string, projectId: string, topic: str
     for (const fileName of runArtifactFiles) {
       const content =
         readRunArtifact(snapshot.id, fileName) ??
+        snapshot.resumeState?.artifacts[fileName] ??
         (fileName === snapshot.result?.artifact?.file ? snapshot.result.artifact.summary : null);
       if (!content) continue;
 
